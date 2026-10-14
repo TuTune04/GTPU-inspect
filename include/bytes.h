@@ -39,40 +39,43 @@
 #include <arpa/inet.h> /* ntohs, ntohl (nếu bạn chọn cách a) */
 
 #ifdef __cplusplus
-extern "C" {
+extern "C"
+{
 #endif
 
-/* Đọc 2 byte big-endian (network order) tại p. */
-static inline uint16_t rd_be16(const uint8_t *p)
-{
-    /* TODO: xóa 2 dòng stub dưới và viết code của bạn */
-    (void)p;
-    return 0;
-}
+    /* Đọc 2 byte big-endian (network order) tại p. */
+    static inline uint16_t rd_be16(const uint8_t *p)
+    {
+        uint16_t v;
+        memcpy(&v, p, sizeof v);
+        return ntohs(v);
+    }
 
-/* Đọc 4 byte big-endian (network order) tại p. */
-static inline uint32_t rd_be32(const uint8_t *p)
-{
-    /* TODO */
-    (void)p;
-    return 0;
-}
+    /* Đọc 4 byte big-endian (network order) tại p. */
+    static inline uint32_t rd_be32(const uint8_t *p)
+    {
+        uint32_t v;
+        memcpy(&v, p, sizeof v);
+        return ntohl(v);
+    }
 
-/* Đọc 2 byte little-endian tại p (dùng cho header pcap). */
-static inline uint16_t rd_le16(const uint8_t *p)
-{
-    /* TODO */
-    (void)p;
-    return 0;
-}
+    /* Hai hàm le dưới đây ghép từng byte bằng phép dịch bit.
+     * Little-endian: p[0] là byte THẤP nhất, nên p[0] dịch 0, p[1] dịch 8... */
 
-/* Đọc 4 byte little-endian tại p (dùng cho header pcap). */
-static inline uint32_t rd_le32(const uint8_t *p)
-{
-    /* TODO */
-    (void)p;
-    return 0;
-}
+    /* Đọc 2 byte little-endian tại p (dùng cho header pcap). */
+    static inline uint16_t rd_le16(const uint8_t *p)
+    {
+        return (uint16_t)((uint16_t)p[0] | (uint16_t)p[1] << 8);
+    }
+
+    /* Đọc 4 byte little-endian tại p (dùng cho header pcap). */
+    static inline uint32_t rd_le32(const uint8_t *p)
+    {
+        return (uint32_t)p[0] |
+               ((uint32_t)p[1] << 8) |
+               ((uint32_t)p[2] << 16) |
+               ((uint32_t)p[3] << 24);
+    }
 
 #ifdef __cplusplus
 }
