@@ -10,9 +10,13 @@
  * CTest tự chạy chương trình trên mọi file .pcap trong tests/data/ (test cli.*):
  * chỉ fail khi crash hoặc sanitizer báo lỗi.
  */
+#include <inttypes.h> /* PRIu64, PRIx32 */
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>    /* printf, fprintf */
 #include <stdlib.h>   /* EXIT_SUCCESS, EXIT_FAILURE, strtoul */
 #include <string.h>   /* strcmp */
+#include <unistd.h>   /* getopt, optind */
 
 #include "pcap.h"
 #include "parser.h"
@@ -56,10 +60,94 @@
  *   Giữ cả hai đường: chế độ tuần tự là "đáp án" để kiểm tra kết quả bản
  *   đa luồng (tổng gói, tổng byte, top N phải giống hệt).
  */
+static void usage(const char *prog)
+{
+    fprintf(stderr, "usage: %s [-v] file.pcap\n", prog);
+}
+
+/* IPv4 host order -> "a.b.c.d". buf tối thiểu 16 byte. */
+static void fmt_ip(char *buf, size_t cap, uint32_t ip)
+{
+    snprintf(buf, cap, "%u.%u.%u.%u", (unsigned)((ip >> 24) & 0xffu),
+             (unsigned)((ip >> 16) & 0xffu), (unsigned)((ip >> 8) & 0xffu),
+             (unsigned)(ip & 0xffu));
+}
+
+static void print_packet(uint64_t idx, enum parse_result res,
+                         const struct pkt_info *info)
+{
+    char src[16], dst[16];
+
+    printf("#%-4" PRIu64 " %-24s", idx, parse_result_str(res));
+    if (res == PARSE_OK)
+    {
+        printf(" teid=0x%08" PRIx32 " %s", info->gtp.teid,
+               gtpu_msg_type_str(info->gtp.msg_type));
+        if (info->has_inner)
+        {
+            fmt_ip(src, sizeof src, info->inner_src_ip);
+            fmt_ip(dst, sizeof dst, info->inner_dst_ip);
+            printf(" %s -> %s", src, dst);
+        }
+    }
+    printf("\n");
+}
+
 int main(int argc, char **argv)
 {
-    /* TODO: xóa stub và viết code của bạn */
-    (void)argc;
-    (void)argv;
-    return EXIT_SUCCESS;
+    uint64_t counts[PARSE_RESULT_COUNT] = {0};
+    uint64_t idx = 0;
+    bool verbose = false;
+    struct pcap_reader *reader;
+    struct pcap_packet pkt;
+    struct pkt_info info;
+    enum pcap_status st;
+    int opt;
+
+    while ((opt = getopt(argc, argv, "v")) != -1)
+    {
+        if (opt != 'v')
+        {
+            usage(argv[0]);
+            return 2;
+        }
+        verbose = true;
+    }
+    if (argc - optind != 1)
+    {
+        usage(argv[0]);
+        return 2;
+    }
+
+    st = pcap_open(argv[optind], &reader);
+    if (st != PCAP_OK)
+    {
+        fprintf(stderr, "%s: %s\n", argv[optind], pcap_status_str(st));
+        return EXIT_FAILURE;
+    }
+
+    while ((st = pcap_next(reader, &pkt)) == PCAP_OK)
+    {
+        enum parse_result res = parse_packet(pkt.data, pkt.caplen, &info);
+        counts[res]++;
+        if (verbose)
+            print_packet(idx, res, &info);
+        idx++;
+    }
+
+    /* File hỏng giữa chừng: báo lỗi nhưng vẫn in thống kê phần đã đọc. */
+    if (st != PCAP_EOF)
+        fprintf(stderr, "%s: %s (sau %" PRIu64 " gói)\n", argv[optind],
+                pcap_status_str(st), idx);
+
+    printf("Packets: %" PRIu64 "\n", idx);
+    for (int i = 0; i < PARSE_RESULT_COUNT; i++)
+    {
+        if (counts[i] > 0)
+            printf("  %-24s %" PRIu64 "\n", parse_result_str((enum parse_result)i),
+                   counts[i]);
+    }
+
+    pcap_close(reader);
+    return st == PCAP_EOF ? EXIT_SUCCESS : EXIT_FAILURE;
 }

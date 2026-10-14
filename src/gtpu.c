@@ -9,6 +9,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>   /* memset */
 
 #include "bytes.h"    /* rd_be16, rd_be32 */
 
@@ -78,12 +79,48 @@
 enum parse_result gtpu_parse(const uint8_t *p, size_t len,
                              struct gtpu_hdr *h, size_t *payload_off)
 {
-    /* TODO: xóa stub và viết code của bạn */
-    (void)p;
-    (void)len;
-    (void)h;
-    (void)payload_off;
-    return PARSE_ERR_GTP_TRUNCATED;
+    size_t off;
+
+    memset(h, 0, sizeof *h);
+
+    if (len < GTPU_HEADER_LEN)
+        return PARSE_ERR_GTP_TRUNCATED;
+
+    h->flags = p[0];
+    h->version = (uint8_t)(h->flags >> 5);
+    h->pt = (uint8_t)((h->flags >> 4) & 1u);
+    if (h->version != 1u)
+        return PARSE_ERR_GTP_BAD_VERSION;
+    if (h->pt != 1u)
+        return PARSE_ERR_GTP_BAD_PT;
+
+    h->msg_type = p[1];
+    h->length = rd_be16(p + 2);
+    h->teid = rd_be32(p + 4);
+    off = GTPU_HEADER_LEN;
+
+    /* Cờ E/S/PN: chỉ cần MỘT cờ bật là cả 4 byte tùy chọn đều có mặt.
+     * Kiểm tra bước này TRƯỚC khi so length để gói thiếu byte tùy chọn được
+     * báo đúng lý do opt_truncated. */
+    h->has_opt = (h->flags & (GTPU_FLAG_E | GTPU_FLAG_S | GTPU_FLAG_PN)) != 0u;
+    if (h->has_opt)
+    {
+        if (len < GTPU_HEADER_LEN + GTPU_OPT_LEN)
+            return PARSE_ERR_GTP_OPT_TRUNCATED;
+        h->seq = rd_be16(p + 8);
+        h->npdu = p[10];
+        h->next_ext = p[11];
+        off += GTPU_OPT_LEN;
+    }
+
+    /* Không tin trường length: nó phải khớp đúng với UDP payload. */
+    if (GTPU_HEADER_LEN + (size_t)h->length != len)
+        return PARSE_ERR_GTP_LEN_MISMATCH;
+
+    /* [TUẦN 1] Chưa duyệt chuỗi extension: T-PDU coi như bắt đầu ngay sau
+     * phần tùy chọn. Gói có cờ E sẽ chưa đúng cho tới tuần 2. */
+    *payload_off = off;
+    return PARSE_OK;
 }
 
 /*
@@ -95,7 +132,19 @@ enum parse_result gtpu_parse(const uint8_t *p, size_t len,
  */
 const char *gtpu_msg_type_str(uint8_t msg_type)
 {
-    /* TODO */
-    (void)msg_type;
-    return "Unknown";
+    switch (msg_type)
+    {
+    case GTPU_MSG_ECHO_REQ:
+        return "Echo Request";
+    case GTPU_MSG_ECHO_RESP:
+        return "Echo Response";
+    case GTPU_MSG_ERROR_IND:
+        return "Error Indication";
+    case GTPU_MSG_END_MARKER:
+        return "End Marker";
+    case GTPU_MSG_GPDU:
+        return "G-PDU";
+    default:
+        return "Unknown";
+    }
 }
