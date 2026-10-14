@@ -14,6 +14,7 @@ include(GoogleTest)
 
 add_executable(gtpu_tests
   test_fixtures.cpp
+  test_bytes.cpp
   test_pcap.cpp
   test_parser.cpp
   test_gtpu.cpp
