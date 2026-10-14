@@ -1,0 +1,2 @@
+# kết quả mong đợi của pcap reader: file <verdict> <số gói>
+file err:unsupported_linktype 0 # 113 = Linux cooked (SLL)

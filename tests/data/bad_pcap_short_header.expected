@@ -1,0 +1,2 @@
+# kết quả mong đợi của pcap reader: file <verdict> <số gói>
+file err:truncated_global_header 0 # chỉ 20/24 byte

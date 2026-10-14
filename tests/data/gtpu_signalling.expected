@@ -1,0 +1,6 @@
+# Echo, Error Indication, End Marker
+# idx verdict teid msg_type qfi # ghi chú
+0 ok 0x00000000 1 - # Echo Request (TEID phải = 0)
+1 ok 0x00000000 2 - # Echo Response, có IE Recovery (type 14)
+2 ok 0x00000000 26 - # Error Indication cho TEID 0x1001
+3 ok 0x00002001 254 - # End Marker (handover), không payload

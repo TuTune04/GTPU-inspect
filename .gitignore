@@ -1,0 +1,12 @@
+build*/
+.cache/
+compile_commands.json
+__pycache__/
+*.pyc
+bench/data/
+fuzz/corpus/
+crash-*
+leak-*
+timeout-*
+oom-*
+*.profraw

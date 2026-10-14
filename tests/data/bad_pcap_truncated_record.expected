@@ -1,0 +1,2 @@
+# kết quả mong đợi của pcap reader: file <verdict> <số gói>
+file err:truncated_record 1 # gói 2 bị cắt giữa chừng

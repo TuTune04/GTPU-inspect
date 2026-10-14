@@ -1,0 +1,2 @@
+# kết quả mong đợi của pcap reader: file <verdict> <số gói>
+file ok 0 # chỉ có global header, không có gói

@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  fixtures:
+    name: Fixtures are reproducible
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r tools/requirements.txt
+      - name: Regenerate and compare with committed files
+        run: |
+          python3 tools/gen_pcaps.py
+          git status --porcelain tests/data
+          git diff --exit-code --stat tests/data
+          test -z "$(git status --porcelain tests/data)"
+
+  build-test:
+    name: ${{ matrix.cc }} / ${{ matrix.config }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+        config: [Debug, Release, Sanitize]
+    env:
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cc == 'gcc' && 'g++' || 'clang++' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: |
+          if [ "${{ matrix.config }}" = Sanitize ]; then
+            cmake -B build -DCMAKE_BUILD_TYPE=Debug -DGTPU_SANITIZE=ON
+          else
+            cmake -B build -DCMAKE_BUILD_TYPE=${{ matrix.config }}
+          fi
+      - name: Build
+        run: cmake --build build -j
+      - name: Test
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: ctest --test-dir build --output-on-failure
+
+  valgrind:
+    name: Valgrind
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y valgrind
+      - run: cmake -B build -DCMAKE_BUILD_TYPE=Debug && cmake --build build -j
+      - name: Unit tests under valgrind
+        run: |
+          valgrind --error-exitcode=1 --leak-check=full \
+            --errors-for-leak-kinds=definite,indirect \
+            ./build/tests/gtpu_tests
+      - name: CLI on every fixture under valgrind
+        run: |
+          if [ ! -x build/gtpu-inspect ]; then
+            echo "chưa có src/main.c, bỏ qua"; exit 0
+          fi
+          for f in tests/data/*.pcap; do
+            echo "== $f"
+            valgrind -q --error-exitcode=99 --leak-check=full \
+              --errors-for-leak-kinds=definite,indirect \
+              ./build/gtpu-inspect "$f" > /dev/null || [ $? -ne 99 ]
+          done
+
+  fuzz-smoke:
+    name: Fuzz (60s smoke)
+    runs-on: ubuntu-24.04
+    env:
+      CC: clang
+      CXX: clang++
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -B build-fuzz -DGTPU_BUILD_FUZZ=ON && cmake --build build-fuzz -j
+      - run: python3 tools/make_corpus.py
+      - run: ./build-fuzz/fuzz/fuzz_parser fuzz/corpus -max_total_time=60
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes
+          path: crash-*

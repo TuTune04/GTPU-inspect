@@ -1,0 +1,8 @@
+# gói không phải GTP-U, phải bị bỏ qua
+# idx verdict teid msg_type qfi # ghi chú
+0 ignored:not_ipv4 - - - # ARP
+1 ignored:not_ipv4 - - - # IPv6 (bản tối thiểu chỉ hỗ trợ outer IPv4)
+2 ignored:not_udp - - - # TCP thường
+3 ignored:not_gtpu_port - - - # UDP cổng khác 2152
+4 ignored:not_gtpu_port - - - # GTP-C (cổng 2123) — không phải GTP-U
+5 ignored:ip_fragment - - - # outer IP bị phân mảnh (MF=1): bản tối thiểu không ghép mảnh

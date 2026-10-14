@@ -1,0 +1,23 @@
+# gói lỗi có chủ đích, mỗi gói một lý do
+# idx verdict teid msg_type qfi # ghi chú
+0 err:eth_truncated - - - # chỉ còn 10 byte, chưa đủ 14 byte Ethernet
+1 err:ip_truncated - - - # IPv4 header bị cắt ở byte 12
+2 err:ip_bad_ihl - - - # IHL=3, nhỏ hơn mức tối thiểu 5
+3 err:ip_bad_version - - - # EtherType IPv4 nhưng version=6
+4 err:ip_len_mismatch - - - # IP total length=2000 lớn hơn dữ liệu thực có
+5 err:udp_truncated - - - # UDP header chỉ còn 4 byte
+6 err:udp_len_mismatch - - - # UDP length=4000 vượt quá IP payload
+7 err:udp_len_mismatch - - - # UDP length=4 (<8)
+8 err:gtp_truncated - - - # GTP-U chỉ có 5 byte (<8 byte bắt buộc)
+9 err:gtp_bad_version - - - # version=2 (GTPv2-C) trên cổng GTP-U
+10 err:gtp_bad_pt - - - # PT=0 (GTP'), không phải GTP
+11 err:gtp_len_mismatch - - - # GTP length=5000 lớn hơn phần còn lại của UDP
+12 err:gtp_len_mismatch - - - # GTP length nhỏ hơn thực tế (không khớp UDP length)
+13 err:gtp_opt_truncated - - - # cờ S bật nhưng chỉ còn 2/4 byte tùy chọn
+14 err:gtp_ext_bad_len - - - # extension length=0 (cấm theo spec; dễ gây lặp vô hạn)
+15 err:gtp_ext_truncated - - - # extension length=10 (40 byte) vượt quá gói
+16 err:gtp_ext_truncated - - - # extension bị cắt giữa chừng (2/4 byte)
+17 err:gtp_ext_too_many - - - # chuỗi 64 extension header liên tiếp: nên đặt giới hạn số lượng
+18 err:inner_truncated - - - # G-PDU nhưng inner IPv4 chỉ có 12 byte
+19 err:inner_bad_ihl - - - # inner IPv4 IHL=3 (<5)
+20 err:ip_len_mismatch - - - # caplen=60 < orig_len: capture bị cắt, IP total length > caplen

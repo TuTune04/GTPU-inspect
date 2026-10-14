@@ -1,0 +1,2 @@
+# kết quả mong đợi của pcap reader: file <verdict> <số gói>
+file ok 2 # magic big-endian, phải swap mọi trường header

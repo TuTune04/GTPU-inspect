@@ -26,3 +26,29 @@ captures, decodes the Ethernet → IPv4 → UDP → GTP-U → inner IP stack acc
 During my internship in network protocol research, I analyzed traffic with Wireshark.
 This project is my way of understanding what the software that processes that traffic
 inside a mobile network actually does.
+
+### Build & test
+```sh
+pip install -r tools/requirements.txt     # only needed to regenerate test data
+cmake -B build -DGTPU_SANITIZE=ON
+cmake --build build -j
+ctest --test-dir build --output-on-failure
+```
+
+| CMake option | Effect |
+|---|---|
+| `GTPU_SANITIZE=ON` | build with AddressSanitizer + UBSan |
+| `GTPU_BUILD_FUZZ=ON` | build the libFuzzer target (requires `CC=clang CXX=clang++`) |
+| `GTPU_BUILD_BENCH=ON` | build programs in `bench/` |
+| `GTPU_BUILD_TESTS=OFF` | skip unit tests |
+
+### Repository layout
+```
+include/, src/   core C11 (parser, GTP-U, session table, ring, mempool)
+tests/           GoogleTest unit tests + data-driven tests on tests/data/*.pcap
+tests/data/      generated pcaps, each with a .expected file (per-packet verdict)
+tools/           gen_pcaps.py (Scapy), make_corpus.py, tshark_dump.sh
+fuzz/            libFuzzer target
+bench/           benchmark notes and programs
+docs/ROADMAP.md  week-by-week plan and checklist
+```

@@ -1,0 +1,6 @@
+# 5G extension header, QFI
+# idx verdict teid msg_type qfi # ghi chú
+0 ok 0x00005001 255 9 # UL PDU session container, QFI=9
+1 ok 0x00006001 255 5 # DL PDU session container, QFI=5, RQI=1
+2 ok 0x00005002 255 1 # chuỗi 2 extension: UDP Port (0x40) -> PDU session (0x85)
+3 ok 0x00005003 255 63 # cờ E+S cùng lúc, QFI=63 (max 6 bit)

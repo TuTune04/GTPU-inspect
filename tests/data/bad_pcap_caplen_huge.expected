@@ -1,0 +1,2 @@
+# kết quả mong đợi của pcap reader: file <verdict> <số gói>
+file err:caplen_too_large 1 # caplen=2^31-1: không được malloc theo trường này
