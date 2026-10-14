@@ -6,9 +6,7 @@
 #include <cstdint>
 #include <vector>
 
-// extern "C" {
-// #include "gtpu.h"
-// }
+#include "gtpu.h"
 
 namespace {
 

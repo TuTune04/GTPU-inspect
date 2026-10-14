@@ -2,9 +2,7 @@
 // key = (TEID, IP tunnel endpoint).
 #include <gtest/gtest.h>
 
-// extern "C" {
-// #include "session_table.h"
-// }
+#include "session_table.h"
 
 TEST(SessionTable, InsertThenLookup) {
   // Thêm vài key, tra lại được đúng bản ghi; key chưa thêm trả NULL.

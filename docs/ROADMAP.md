@@ -4,6 +4,27 @@ Khung repo đã có sẵn build, test, CI, dữ liệu test. Phần core trong `
 `include/` là của bạn. Mỗi khi bạn tạo một file trong danh sách
 `GTPU_CORE_CANDIDATES` (xem `CMakeLists.txt`), CMake tự đưa nó vào build.
 
+## Bản đồ file
+
+Header trong `include/` đã khai báo đủ kiểu và prototype. Mỗi hàm trong
+`src/*.c` có comment hướng dẫn ngay phía trên và một stub `/* TODO */`:
+xóa stub, viết code của bạn vào đó.
+
+| Tuần | Header | Cần viết |
+|---|---|---|
+| 1 | `bytes.h` | `rd_be16`, `rd_be32`, `rd_le16`, `rd_le32` (viết ngay trong header) |
+| 1 | `pcap.h` | `src/pcap.c` |
+| 1 | `parse_result.h`, `parser.h` | `src/parser.c` |
+| 1 (+2) | `gtpu.h` | `src/gtpu.c` (tuần 2: extension header) |
+| 1 → 3 | | `src/main.c` |
+| 2 | `session_table.h` | `src/session_table.c` |
+| 2 | `stats.h` | `src/stats.c` |
+| 3 | `ring.h` | `src/ring.c` |
+| 3 | `mempool.h` | `src/mempool.c` |
+| 3 | `pipeline.h` | `src/pipeline.c` |
+
+Bạn được đổi API trong header nếu thấy hợp lý hơn; nhớ sửa test theo.
+
 ## Vòng lặp làm việc
 
 ```sh
@@ -11,19 +32,8 @@ cmake -B build -DGTPU_SANITIZE=ON      # lần đầu, hoặc khi thêm file .c 
 cmake --build build -j && ctest --test-dir build --output-on-failure
 ```
 
-Bật một test: bỏ comment phần `#include` trong file `tests/test_*.cpp`,
-thay `GTEST_SKIP()` bằng assertion. Header C dùng trong C++ cần
-`extern "C"`, tốt nhất đặt luôn trong header:
-
-```c
-#ifdef __cplusplus
-extern "C" {
-#endif
-/* ... khai báo ... */
-#ifdef __cplusplus
-}
-#endif
-```
+Bật một test: trong `tests/test_*.cpp`, thay `GTEST_SKIP()` bằng assertion
+thật. Các header đã có sẵn `extern "C"` nên include thẳng từ C++ được.
 
 ## Tuần 1: đọc pcap và parse tới GTP-U
 

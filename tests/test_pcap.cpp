@@ -1,15 +1,12 @@
 // Test cho pcap reader (src/pcap.c).
 //
-// Cách bật: tạo include/pcap.h + src/pcap.c, include header ở dưới (bọc
-// trong extern "C" nếu header chưa tự làm), rồi thay GTEST_SKIP() bằng
-// assertion thật. Các file .expected tương ứng cho biết kết quả đúng.
+// Cách bật: viết src/pcap.c, rồi thay GTEST_SKIP() bằng assertion thật.
+// Các file .expected tương ứng cho biết kết quả đúng.
 #include <gtest/gtest.h>
 
 #include "expected.hpp"
 
-// extern "C" {
-// #include "pcap.h"
-// }
+#include "pcap.h"
 
 using namespace gtpu_test;
 

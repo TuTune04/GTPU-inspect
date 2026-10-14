@@ -5,7 +5,7 @@
 2 err:ip_bad_ihl - - - # IHL=3, nhỏ hơn mức tối thiểu 5
 3 err:ip_bad_version - - - # EtherType IPv4 nhưng version=6
 4 err:ip_len_mismatch - - - # IP total length=2000 lớn hơn dữ liệu thực có
-5 err:udp_truncated - - - # UDP header chỉ còn 4 byte
+5 err:udp_truncated - - - # IP hợp lệ (total=24) nhưng UDP header chỉ có 4 byte
 6 err:udp_len_mismatch - - - # UDP length=4000 vượt quá IP payload
 7 err:udp_len_mismatch - - - # UDP length=4 (<8)
 8 err:gtp_truncated - - - # GTP-U chỉ có 5 byte (<8 byte bắt buộc)

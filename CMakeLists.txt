@@ -60,7 +60,8 @@ set(GTPU_CORE_CANDIDATES
   src/session_table.c
   src/stats.c
   src/ring.c
-  src/mempool.c)
+  src/mempool.c
+  src/pipeline.c)
 
 set(GTPU_CORE_SOURCES "")
 foreach(f IN LISTS GTPU_CORE_CANDIDATES)

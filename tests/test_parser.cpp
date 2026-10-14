@@ -13,10 +13,8 @@
 
 #include "expected.hpp"
 
-// extern "C" {
-// #include "pcap.h"
-// #include "parser.h"
-// }
+#include "pcap.h"
+#include "parser.h"
 
 using namespace gtpu_test;
 

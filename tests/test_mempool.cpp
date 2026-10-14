@@ -1,9 +1,7 @@
 // Test cho memory pool (src/mempool.c) — phần tuần 3.
 #include <gtest/gtest.h>
 
-// extern "C" {
-// #include "mempool.h"
-// }
+#include "mempool.h"
 
 TEST(Mempool, AllocUntilExhausted) {
   // Pool N phần tử: cấp được đúng N lần, lần N+1 trả NULL.

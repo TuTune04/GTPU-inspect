@@ -1,9 +1,7 @@
 // Test cho ring buffer SPSC lock-free (src/ring.c) — phần tuần 3.
 #include <gtest/gtest.h>
 
-// extern "C" {
-// #include "ring.h"
-// }
+#include "ring.h"
 
 TEST(Ring, PushPopSingleThread) {
   // push 1, 2, 3 rồi pop ra đúng 1, 2, 3; pop khi rỗng trả thất bại.

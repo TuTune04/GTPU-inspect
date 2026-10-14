@@ -316,7 +316,9 @@ def gen_malformed():
     add(bytes(bad), "ip_bad_version", "EtherType IPv4 nhưng version=6")
     add(udp_with(gtpu_raw(0x1001, payload=good_inner), len=2000),
         "ip_len_mismatch", "IP total length=2000 lớn hơn dữ liệu thực có")
-    add(good[:14 + 20 + 4], "udp_truncated", "UDP header chỉ còn 4 byte")
+    add(bytes(base / IP(src=ENB_IP, dst=SGW_IP, id=1, proto=17, len=24)
+              / Raw(good[34:38])),
+        "udp_truncated", "IP hợp lệ (total=24) nhưng UDP header chỉ có 4 byte")
     bad = bytearray(good); struct.pack_into("!H", bad, 14 + 20 + 4, 4000)
     add(bytes(bad), "udp_len_mismatch", "UDP length=4000 vượt quá IP payload")
     bad = bytearray(good); struct.pack_into("!H", bad, 14 + 20 + 4, 4)
