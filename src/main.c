@@ -20,8 +20,8 @@
 
 #include "pcap.h"
 #include "parser.h"
-/* #include "session_table.h"   tuần 2 */
-/* #include "stats.h"           tuần 2 */
+#include "session_table.h"
+#include "stats.h"
 /* #include "pipeline.h"        tuần 3 */
 
 /*
@@ -62,7 +62,7 @@
  */
 static void usage(const char *prog)
 {
-    fprintf(stderr, "usage: %s [-v] file.pcap\n", prog);
+    fprintf(stderr, "usage: %s [-v] [-n TOP] file.pcap\n", prog);
 }
 
 /* IPv4 host order -> "a.b.c.d". buf tối thiểu 16 byte. */
@@ -95,8 +95,11 @@ static void print_packet(uint64_t idx, enum parse_result res,
 
 int main(int argc, char **argv)
 {
-    uint64_t counts[PARSE_RESULT_COUNT] = {0};
+    struct stats stats;
+    struct session_table *sessions;
     uint64_t idx = 0;
+    uint64_t dropped_sessions = 0;
+    size_t top_n = 10;
     bool verbose = false;
     struct pcap_reader *reader;
     struct pcap_packet pkt;
@@ -104,14 +107,29 @@ int main(int argc, char **argv)
     enum pcap_status st;
     int opt;
 
-    while ((opt = getopt(argc, argv, "v")) != -1)
+    while ((opt = getopt(argc, argv, "vn:")) != -1)
     {
-        if (opt != 'v')
+        if (opt == 'v')
+        {
+            verbose = true;
+        }
+        else if (opt == 'n')
+        {
+            char *end;
+            unsigned long v = strtoul(optarg, &end, 10);
+
+            if (*optarg == '\0' || *end != '\0')
+            {
+                usage(argv[0]);
+                return 2;
+            }
+            top_n = (size_t)v;
+        }
+        else
         {
             usage(argv[0]);
             return 2;
         }
-        verbose = true;
     }
     if (argc - optind != 1)
     {
@@ -126,10 +144,21 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
+    stats_init(&stats);
+    sessions = session_table_create(1024);
+    if (sessions == NULL)
+    {
+        fprintf(stderr, "không đủ bộ nhớ cho bảng phiên\n");
+        pcap_close(reader);
+        return EXIT_FAILURE;
+    }
+
     while ((st = pcap_next(reader, &pkt)) == PCAP_OK)
     {
         enum parse_result res = parse_packet(pkt.data, pkt.caplen, &info);
-        counts[res]++;
+        if (stats_record(&stats, sessions, res, &info, pkt.orig_len,
+                         pkt.ts_ns) != 0)
+            dropped_sessions++;
         if (verbose)
             print_packet(idx, res, &info);
         idx++;
@@ -140,14 +169,14 @@ int main(int argc, char **argv)
         fprintf(stderr, "%s: %s (sau %" PRIu64 " gói)\n", argv[optind],
                 pcap_status_str(st), idx);
 
-    printf("Packets: %" PRIu64 "\n", idx);
-    for (int i = 0; i < PARSE_RESULT_COUNT; i++)
-    {
-        if (counts[i] > 0)
-            printf("  %-24s %" PRIu64 "\n", parse_result_str((enum parse_result)i),
-                   counts[i]);
-    }
+    if (verbose)
+        printf("\n");
+    stats_print(&stats, sessions, top_n, stdout);
+    if (dropped_sessions > 0)
+        fprintf(stderr, "không thêm được phiên cho %" PRIu64 " gói\n",
+                dropped_sessions);
 
+    session_table_destroy(sessions);
     pcap_close(reader);
     return st == PCAP_EOF ? EXIT_SUCCESS : EXIT_FAILURE;
 }
