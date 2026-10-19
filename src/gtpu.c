@@ -48,6 +48,51 @@
  */
 
 /*
+ * Quyết định về extension type lạ: bỏ qua nội dung, đi tiếp theo length.
+ * Hai bit cao của type (TS 29.281 mục 5.2.1) cho biết bên NHẬN có bắt buộc
+ * phải hiểu extension hay không (10/11 = bắt buộc, 00/01 = không). Đó là
+ * nghĩa vụ của endpoint xử lý gói; gtpu-inspect chỉ quan sát trên đường đi
+ * nên không từ chối gói chỉ vì không hiểu một extension. Gói hỏng cấu trúc
+ * (length 0, vượt gói, chuỗi quá dài) vẫn bị báo lỗi như bình thường.
+ */
+static enum parse_result gtpu_parse_ext(const uint8_t *p, size_t len,
+                                        size_t *off, uint8_t first_type,
+                                        struct gtpu_hdr *h)
+{
+    uint8_t type = first_type;
+
+    while (type != GTPU_EXT_NONE)
+    {
+        size_t ext_len;
+
+        if (h->n_ext >= GTPU_MAX_EXT_HEADERS)
+            return PARSE_ERR_GTP_EXT_TOO_MANY;
+        if (*off >= len)
+            return PARSE_ERR_GTP_EXT_TRUNCATED;
+
+        /* length = 0 khiến *off không tiến -> vòng lặp không bao giờ dừng. */
+        ext_len = (size_t)p[*off] * 4u;
+        if (ext_len == 0u)
+            return PARSE_ERR_GTP_EXT_BAD_LEN;
+        if (ext_len > len - *off)
+            return PARSE_ERR_GTP_EXT_TRUNCATED;
+
+        /* ext_len >= 4 nên p[*off + 1], p[*off + 2] chắc chắn nằm trong gói. */
+        if (type == GTPU_EXT_PDU_SESSION)
+        {
+            h->pdu_type = (uint8_t)(p[*off + 1] >> 4);
+            h->qfi = (uint8_t)(p[*off + 2] & 0x3Fu);
+            h->has_qfi = true;
+        }
+
+        h->n_ext++;
+        type = p[*off + ext_len - 1u];
+        *off += ext_len;
+    }
+    return PARSE_OK;
+}
+
+/*
  * gtpu_parse                                                   [TUẦN 1]
  *
  * Các bước:
@@ -117,8 +162,15 @@ enum parse_result gtpu_parse(const uint8_t *p, size_t len,
     if (GTPU_HEADER_LEN + (size_t)h->length != len)
         return PARSE_ERR_GTP_LEN_MISMATCH;
 
-    /* [TUẦN 1] Chưa duyệt chuỗi extension: T-PDU coi như bắt đầu ngay sau
-     * phần tùy chọn. Gói có cờ E sẽ chưa đúng cho tới tuần 2. */
+    /* Cờ E bật: duyệt chuỗi extension, off dừng ở đầu T-PDU. Nếu E tắt thì
+     * byte 11 (next_ext) không có nghĩa, không đọc chuỗi. */
+    if (h->flags & GTPU_FLAG_E)
+    {
+        enum parse_result res = gtpu_parse_ext(p, len, &off, h->next_ext, h);
+        if (res != PARSE_OK)
+            return res;
+    }
+
     *payload_off = off;
     return PARSE_OK;
 }
