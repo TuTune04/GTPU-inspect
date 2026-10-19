@@ -24,9 +24,8 @@ using namespace gtpu_test;
 
 namespace {
 
-// Đọc từng gói trong <name>.pcap, parse, rồi so với dòng tương ứng trong
+// <name>.expected. Mọi gói, kể cả lỗi extension header (tuần 2), đều được kiểm tra.
 // <name>.expected. Các gói thuộc tuần 2 (lý do lỗi bắt đầu bằng "gtp_ext")
-// chưa kiểm tra vì parser chưa duyệt chuỗi extension header.
 void check_fixture(const std::string &name) {
   auto expected = load_expected(name);
   ASSERT_FALSE(expected.empty());

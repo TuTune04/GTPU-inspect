@@ -19,6 +19,7 @@ add_executable(gtpu_tests
   test_parser.cpp
   test_gtpu.cpp
   test_session_table.cpp
+  test_stats.cpp
   test_ring.cpp
   test_mempool.cpp)
 target_compile_options(gtpu_tests PRIVATE ${GTPU_CXX_WARNINGS})
