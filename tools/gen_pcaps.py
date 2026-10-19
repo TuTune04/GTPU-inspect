@@ -273,7 +273,7 @@ def gen_non_gtpu():
         rows.append((f"ignored:{reason}", None, None, None, note))
 
     add(Ether(src=ENB_MAC, dst="ff:ff:ff:ff:ff:ff")
-        / ARP(psrc=ENB_IP, pdst=SGW_IP), "not_ipv4", "ARP")
+        / ARP(hwsrc=ENB_MAC, psrc=ENB_IP, pdst=SGW_IP), "not_ipv4", "ARP")
     add(Ether(src=ENB_MAC, dst=SGW_MAC) / IPv6(src="fd00::1", dst="fd00::2")
         / UDP(sport=GTPU_PORT, dport=GTPU_PORT), "not_ipv4",
         "IPv6 (bản tối thiểu chỉ hỗ trợ outer IPv4)")
