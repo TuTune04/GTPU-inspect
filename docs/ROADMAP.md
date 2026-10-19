@@ -55,17 +55,17 @@ thật. Các header đã có sẵn `extern "C"` nên include thẳng từ C++ đ
 
 ## Tuần 2: extension header, bảng phiên, gói lỗi
 
-- [ ] Duyệt chuỗi extension header, lấy QFI từ PDU Session Container (0x85).
+- [x] Duyệt chuỗi extension header, lấy QFI từ PDU Session Container (0x85).
       Fixture: `gtpu_5g_ext`.
   - Đọc TS 29.281 mục 5.2: đơn vị độ dài, ý nghĩa 2 bit cao của type,
     vì sao length = 0 là nguy hiểm.
-- [ ] Toàn bộ `malformed.pcap` cho đúng lý do lỗi; test
+- [x] Toàn bộ `malformed.pcap` cho đúng lý do lỗi; test
       `EveryTruncationOfValidPacketIsSafe` pass dưới ASan.
-- [ ] `src/session_table.c`: open addressing, key (TEID, IP endpoint).
+- [x] `src/session_table.c`: open addressing, key (TEID, IP endpoint).
       Test: `tests/test_session_table.cpp`.
   - Tự trả lời: hàm hash nào? linear hay quadratic probing? xóa phần tử thế
     nào (tombstone)? load factor bao nhiêu thì resize?
-- [ ] `src/stats.c`: đếm theo message type, theo lý do lỗi, top N phiên.
+- [x] `src/stats.c`: đếm theo message type, theo lý do lỗi, top N phiên.
 - [ ] Valgrind sạch: CI job `valgrind` xanh.
 
 ## Tuần 3: đa luồng, mempool, benchmark, fuzz
