@@ -37,20 +37,20 @@ thật. Các header đã có sẵn `extern "C"` nên include thẳng từ C++ đ
 
 ## Tuần 1: đọc pcap và parse tới GTP-U
 
-- [ ] `include/pcap.h`, `src/pcap.c`: mở file, đọc global header, đọc từng record.
+- [x] `include/pcap.h`, `src/pcap.c`: mở file, đọc global header, đọc từng record.
       Test: `tests/test_pcap.cpp`, dữ liệu `pcap_*.pcap`, `bad_pcap_*.pcap`.
   - Tự trả lời: phân biệt little/big-endian bằng magic thế nào? Có nên malloc
     theo `caplen` không? Nên giới hạn `caplen` tối đa bao nhiêu?
-- [ ] `include/parser.h`, `src/parser.c`: Ethernet → IPv4 → UDP.
+- [x] `include/parser.h`, `src/parser.c`: Ethernet → IPv4 → UDP.
   - Gợi ý thiết kế: hàm nhận `(const uint8_t *buf, size_t len)` và một struct
     kết quả do người gọi cấp; trả về enum lý do (ok / ignored / từng loại lỗi).
     Đọc trường nhiều byte bằng `memcpy` vào biến rồi `ntohs`/`ntohl`.
   - Mọi lần đọc đều phải có kiểm tra "còn đủ byte không" ngay trước đó.
-- [ ] `include/gtpu.h`, `src/gtpu.c`: 8 byte bắt buộc + 4 byte tùy chọn.
+- [x] `include/gtpu.h`, `src/gtpu.c`: 8 byte bắt buộc + 4 byte tùy chọn.
       Test: `tests/test_gtpu.cpp`.
-- [ ] `src/main.c`: in mỗi gói một dòng. Khi có file này, CTest tự thêm các
+- [x] `src/main.c`: in mỗi gói một dòng. Khi có file này, CTest tự thêm các
       test `cli.*` chạy chương trình trên mọi fixture.
-- [ ] Bật `tests/test_parser.cpp` cho `gtpu_basic`, `gtpu_optional_fields`,
+- [x] Bật `tests/test_parser.cpp` cho `gtpu_basic`, `gtpu_optional_fields`,
       `non_gtpu`. So với Wireshark: `tools/tshark_dump.sh tests/data/gtpu_basic.pcap`.
 
 ## Tuần 2: extension header, bảng phiên, gói lỗi
