@@ -41,7 +41,6 @@ void check_fixture(const std::string &name) {
     const ExpectedPacket &e = expected[i];
     SCOPED_TRACE(name + " #" + std::to_string(i) + ": " + e.note);
     ++i;
-    if (e.reason().rfind("gtp_ext", 0) == 0) continue;
 
     pkt_info info;
     parse_result res = parse_packet(pkt.data, pkt.caplen, &info);
