@@ -60,6 +60,85 @@
 #include <stdlib.h>   /* calloc, free, qsort */
 #include <string.h>   /* memset */
 
+#define MIN_CAPACITY 16u
+/* Resize khi (size + 1) / cap > 7/10. Linear probing tụt nhanh khi bảng đầy;
+ * 0.7 giữ số lần dò trung bình thấp mà không tốn quá nhiều bộ nhớ. Luôn còn
+ * ít nhất 30% slot trống nên vòng probe chắc chắn kết thúc. */
+#define LOAD_NUM 7u
+#define LOAD_DEN 10u
+
+struct slot {
+    bool           used;
+    struct session s;
+};
+
+struct session_table {
+    struct slot *slots;
+    size_t       cap;     /* luôn là lũy thừa của 2 */
+    size_t       size;
+};
+
+/*
+ * Hash: ghép (teid, ip) thành 64 bit rồi trộn bằng finalizer của splitmix64.
+ * TEID cấp tuần tự (0x1001, 0x1002...) nên `teid % cap` sẽ dồn vào các slot
+ * liền kề; finalizer làm mỗi bit đầu vào ảnh hưởng tới mọi bit đầu ra, nên
+ * lấy các bit thấp (h & (cap - 1)) vẫn phân bố đều.
+ */
+static uint64_t key_hash(const struct session_key *k)
+{
+    uint64_t x = ((uint64_t)k->teid << 32) | k->endpoint_ip;
+
+    x ^= x >> 30;
+    x *= 0xbf58476d1ce4e5b9ULL;
+    x ^= x >> 27;
+    x *= 0x94d049bb133111ebULL;
+    x ^= x >> 31;
+    return x;
+}
+
+/* So từng field, không memcmp: padding trong struct không xác định. */
+static bool key_eq(const struct session_key *a, const struct session_key *b)
+{
+    return a->teid == b->teid && a->endpoint_ip == b->endpoint_ip;
+}
+
+/* Trả slot chứa k, hoặc slot trống đầu tiên trên đường dò. */
+static struct slot *probe(struct slot *slots, size_t cap,
+                          const struct session_key *k)
+{
+    size_t mask = cap - 1u;
+    size_t i = (size_t)key_hash(k) & mask;
+
+    while (slots[i].used && !key_eq(&slots[i].s.key, k))
+        i = (i + 1u) & mask;
+    return &slots[i];
+}
+
+/* Cấp mảng gấp đôi và chèn lại từng phần tử: vị trí phụ thuộc cap nên
+ * không thể memcpy mảng cũ. Lỗi -> -1 và bảng giữ nguyên. */
+static int grow(struct session_table *t)
+{
+    size_t new_cap, i;
+    struct slot *new_slots;
+
+    if (t->cap > SIZE_MAX / 2u)
+        return -1;
+    new_cap = t->cap * 2u;
+    new_slots = calloc(new_cap, sizeof *new_slots);
+    if (new_slots == NULL)
+        return -1;
+
+    for (i = 0; i < t->cap; i++)
+    {
+        if (t->slots[i].used)
+            *probe(new_slots, new_cap, &t->slots[i].s.key) = t->slots[i];
+    }
+    free(t->slots);
+    t->slots = new_slots;
+    t->cap = new_cap;
+    return 0;
+}
+
 /*
  * session_table_create
  *   - Làm tròn capacity lên lũy thừa của 2 (tối thiểu ví dụ 16).
@@ -71,16 +150,36 @@
  */
 struct session_table *session_table_create(size_t capacity)
 {
-    /* TODO: xóa stub và viết code của bạn */
-    (void)capacity;
-    return NULL;
+    struct session_table *t;
+    size_t cap = MIN_CAPACITY;
+
+    while (cap < capacity)
+    {
+        if (cap > SIZE_MAX / 2u)
+            return NULL;
+        cap *= 2u;
+    }
+
+    t = calloc(1, sizeof *t);
+    if (t == NULL)
+        return NULL;
+    t->slots = calloc(cap, sizeof *t->slots);   /* calloc tự kiểm tra tràn */
+    if (t->slots == NULL)
+    {
+        free(t);
+        return NULL;
+    }
+    t->cap = cap;
+    return t;
 }
 
 /* session_table_destroy: NULL-safe; free mảng slot rồi free struct. */
 void session_table_destroy(struct session_table *t)
 {
-    /* TODO */
-    (void)t;
+    if (t == NULL)
+        return;
+    free(t->slots);
+    free(t);
 }
 
 /*
@@ -94,37 +193,52 @@ void session_table_destroy(struct session_table *t)
 struct session *session_table_upsert(struct session_table *t,
                                      const struct session_key *key)
 {
-    /* TODO */
-    (void)t;
-    (void)key;
-    return NULL;
+    struct slot *slot = probe(t->slots, t->cap, key);
+
+    if (slot->used)
+        return &slot->s;
+
+    /* Chỉ resize khi thật sự phải chèn mới, để lookup key đã có không làm
+     * mất hiệu lực con trỏ phiên. */
+    if ((t->size + 1u) * LOAD_DEN > t->cap * LOAD_NUM)
+    {
+        if (grow(t) != 0)
+            return NULL;
+        slot = probe(t->slots, t->cap, key);
+    }
+
+    memset(slot, 0, sizeof *slot);
+    slot->used = true;
+    slot->s.key = *key;
+    t->size++;
+    return &slot->s;
 }
 
 /* session_table_find: như upsert nhưng gặp slot trống thì trả NULL. */
 struct session *session_table_find(const struct session_table *t,
                                    const struct session_key *key)
 {
-    /* TODO */
-    (void)t;
-    (void)key;
-    return NULL;
+    struct slot *slot = probe(t->slots, t->cap, key);
+
+    return slot->used ? &slot->s : NULL;
 }
 
 size_t session_table_size(const struct session_table *t)
 {
-    /* TODO */
-    (void)t;
-    return 0;
+    return t->size;
 }
 
 /* session_table_foreach: duyệt mảng slot, gọi fn(&slot->s, ctx) nếu used. */
 void session_table_foreach(const struct session_table *t,
                            session_visit_fn fn, void *ctx)
 {
-    /* TODO */
-    (void)t;
-    (void)fn;
-    (void)ctx;
+    size_t i;
+
+    for (i = 0; i < t->cap; i++)
+    {
+        if (t->slots[i].used)
+            fn(&t->slots[i].s, ctx);
+    }
 }
 
 /*
@@ -139,12 +253,43 @@ void session_table_foreach(const struct session_table *t,
  *   và KHÔNG được viết `return (int)(y - x);` với uint64_t (tràn / sai dấu).
  *   Dùng: return (x < y) - (x > y);
  */
+/* Giảm dần theo bytes; bằng nhau thì xếp theo key để thứ tự ổn định giữa
+ * các lần chạy (tuần 3 cần so kết quả tuần tự với đa luồng). */
+static int cmp_bytes_desc(const void *a, const void *b)
+{
+    const struct session *x = *(const struct session *const *)a;
+    const struct session *y = *(const struct session *const *)b;
+
+    if (x->bytes != y->bytes)
+        return (x->bytes < y->bytes) - (x->bytes > y->bytes);
+    if (x->key.teid != y->key.teid)
+        return (x->key.teid > y->key.teid) - (x->key.teid < y->key.teid);
+    return (x->key.endpoint_ip > y->key.endpoint_ip) -
+           (x->key.endpoint_ip < y->key.endpoint_ip);
+}
+
 size_t session_table_top_n(const struct session_table *t,
                            const struct session **out, size_t n)
 {
-    /* TODO */
-    (void)t;
-    (void)out;
-    (void)n;
-    return 0;
+    const struct session **all;
+    size_t i, k = 0;
+
+    if (n == 0 || t->size == 0)
+        return 0;
+    all = malloc(t->size * sizeof *all);
+    if (all == NULL)
+        return 0;
+
+    for (i = 0; i < t->cap; i++)
+    {
+        if (t->slots[i].used)
+            all[k++] = &t->slots[i].s;
+    }
+    qsort(all, k, sizeof *all, cmp_bytes_desc);
+
+    if (n > k)
+        n = k;
+    memcpy(out, all, n * sizeof *out);
+    free(all);
+    return n;
 }
