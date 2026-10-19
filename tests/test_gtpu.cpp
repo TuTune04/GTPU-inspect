@@ -81,8 +81,15 @@ TEST(Gtpu, MessageTypeNames) {
 
 TEST(Gtpu, ParsesPduSessionContainer) {
   // QFI == 9, PDU type == UL (1), payload offset == 16, payload len 0.
-  (void)kWithPduSession;
-  GTEST_SKIP() << "TODO tuần 2";
+  gtpu_hdr h;
+  size_t off = 0;
+  ASSERT_EQ(gtpu_parse(kWithPduSession.data(), kWithPduSession.size(), &h, &off),
+            PARSE_OK);
+  EXPECT_EQ(h.n_ext, 1);
+  EXPECT_TRUE(h.has_qfi);
+  EXPECT_EQ(h.qfi, 9);
+  EXPECT_EQ(h.pdu_type, 1);
+  EXPECT_EQ(off, kWithPduSession.size());
 }
 
 TEST(Gtpu, LengthFieldIsNotTrusted) {
@@ -100,12 +107,28 @@ TEST(Gtpu, LengthFieldIsNotTrusted) {
 
 TEST(Gtpu, ExtensionLengthZeroIsRejected) {
   // Sửa byte 12 của kWithPduSession thành 0: phải báo lỗi, không lặp vô hạn.
-  GTEST_SKIP() << "TODO tuần 2";
+  std::vector<uint8_t> b = kWithPduSession;
+  b[12] = 0;
+  gtpu_hdr h;
+  size_t off = 0;
+  EXPECT_EQ(gtpu_parse(b.data(), b.size(), &h, &off), PARSE_ERR_GTP_EXT_BAD_LEN);
 }
 
 TEST(Gtpu, UnknownExtensionIsSkipped) {
   // Extension type lạ (ví dụ 0x40 UDP Port) nhưng length hợp lệ: bỏ qua
   // đúng len*4 byte và đi tiếp. Đọc TS 29.281 mục 5.2.1 về hai bit cao của
   // type ("comprehension required") để quyết định khi nào phải báo lỗi.
-  GTEST_SKIP() << "TODO tuần 2";
+  // Chuỗi: UDP Port (0x40, 4 byte) -> PDU Session Container (0x85, QFI=1).
+  const std::vector<uint8_t> b = {
+      0x34, 0xff, 0x00, 0x0c, 0x00, 0x00, 0x50, 0x02,
+      0x00, 0x00, 0x00, 0x40,                          // next = 0x40
+      0x01, 0x12, 0x34, 0x85,                          // len=1, port, next=0x85
+      0x01, 0x10, 0x01, 0x00};                         // len=1, UL, QFI=1, next=0
+  gtpu_hdr h;
+  size_t off = 0;
+  ASSERT_EQ(gtpu_parse(b.data(), b.size(), &h, &off), PARSE_OK);
+  EXPECT_EQ(h.n_ext, 2);
+  EXPECT_TRUE(h.has_qfi);
+  EXPECT_EQ(h.qfi, 1);
+  EXPECT_EQ(off, b.size());
 }

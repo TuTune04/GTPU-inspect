@@ -67,7 +67,6 @@ void check_fixture(const std::string &name) {
 TEST(Parser, Basic) { check_fixture("gtpu_basic"); }
 TEST(Parser, OptionalFields) { check_fixture("gtpu_optional_fields"); }
 TEST(Parser, FiveGExtensions) {
-  GTEST_SKIP() << "TODO tuần 2: duyệt chuỗi extension header, lấy QFI";
   check_fixture("gtpu_5g_ext");
 }
 TEST(Parser, Signalling) { check_fixture("gtpu_signalling"); }
