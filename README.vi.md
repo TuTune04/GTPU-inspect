@@ -81,7 +81,8 @@ Server chỉ nghe trên 127.0.0.1. Sửa code C thì cần build lại (tab Buil
   dải byte vẽ mỗi lớp đúng kích thước thật, vùng gạch đỏ là số byte trường Length của
   GTP đòi mà gói không có, bấm vào một lớp để xem lưới octet của lớp đó. Trường làm
   parser dừng được viền đỏ. Rê chuột lên một trường sẽ tô sáng các byte của nó trong
-  khung hex.
+  khung hex. File trên 3000 gói: bảng và tab So sánh chỉ có chi tiết 3000 gói đầu; số
+  đếm verdict và bảng phiên vẫn tính trên cả file.
 - **Tạo gói**: chỉnh IP/UDP lớp ngoài, cờ GTP-U, chuỗi extension, IP bên trong, hoặc
   cố tình làm hỏng gói (cắt ngắn, sai length, extension length = 0…). Lưới octet và
   verdict của parser cập nhật ngay khi gõ. Ghi ra `build/ui/<tên>.pcap`, phân tích,

@@ -81,7 +81,9 @@ server restart; changes to `tools/ui/static/` only need a page reload.
   ↑/↓; the byte strip shows each layer at its real size, a dashed red region marks
   bytes the GTP Length field asks for but the packet does not have, and clicking a
   layer shows its octet grid. The field that stopped the parser is outlined in red.
-  Hovering a field highlights its bytes in the hex dump.
+  Hovering a field highlights its bytes in the hex dump. For files over 3000 packets,
+  the table and the Compare tab show details for the first 3000 only; verdict counts
+  and the session table still cover the whole file.
 - **Build packets**: edit the outer IP/UDP, GTP-U flags, extension chain, inner IP,
   or break the packet on purpose (truncate, wrong length, extension length 0…).
   The octet grid and your parser's verdict update as you type. Save to

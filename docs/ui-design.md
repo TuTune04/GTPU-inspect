@@ -66,7 +66,8 @@ Chuyển động duy nhất: dải byte co giãn khi đổi gói; tắt theo
 
 1. **Phân tích**: câu tóm tắt + thanh đếm verdict (bấm để lọc), bảng gói
    (↑/↓ để duyệt), panel phải gồm dải byte + lưới octet của lớp đang chọn,
-   bảng top phiên.
+   bảng top phiên. File trên 3000 gói: chỉ có chi tiết 3000 gói đầu
+   (`MAX_PACKETS` trong `runner.py`); số đếm và bảng phiên vẫn tính cả file.
 2. **Tạo gói**: form (outer, GTP-U, chuỗi extension, inner, phá hỏng) →
    xem trước dải byte, lưới octet và verdict của binary ngay khi gõ; ghi pcap,
    phân tích, mở Wireshark, xuất code fixture để dán vào `gen_pcaps.py`.
