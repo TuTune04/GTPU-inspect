@@ -1,5 +1,7 @@
 # GTPU-inspect
 
+**English** | [Tiếng Việt](README.vi.md)
+
 **gtpu-inspect** is a user-plane traffic analyzer for 4G/5G mobile networks, written in C11.
 
 In LTE and 5G, user data between the radio access network (eNB/gNB) and the core
