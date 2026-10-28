@@ -20,6 +20,10 @@ jobs:
           git status --porcelain tests/data
           git diff --exit-code --stat tests/data
           test -z "$(git status --porcelain tests/data)"
+      - name: Web UI tests
+        run: |
+          pip install -r tools/ui/requirements.txt
+          python3 -m pytest tools/ui
 
   build-test:
     name: ${{ matrix.cc }} / ${{ matrix.config }}
