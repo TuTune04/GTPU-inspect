@@ -51,4 +51,5 @@ tools/           gen_pcaps.py (Scapy), make_corpus.py, tshark_dump.sh
 fuzz/            libFuzzer target
 bench/           benchmark notes and programs
 docs/ROADMAP.md  week-by-week plan and checklist
+docs/5g-6g/      5G/6G study notes linked to the code
 ```
