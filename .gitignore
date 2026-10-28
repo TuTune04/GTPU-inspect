@@ -10,3 +10,4 @@ leak-*
 timeout-*
 oom-*
 *.profraw
+.venv/

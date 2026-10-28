@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gtpu-inspect</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="/static/app.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='0' y='4' width='3' height='8' fill='%238A94A6'/%3E%3Crect x='3' y='4' width='4' height='8' fill='%233A6EA5'/%3E%3Crect x='7' y='4' width='2' height='8' fill='%232F9C95'/%3E%3Crect x='9' y='4' width='3' height='8' fill='%236B4FBB'/%3E%3Crect x='12' y='4' width='4' height='8' fill='%23C98A1B'/%3E%3C/svg%3E">
+</head>
+<body>
+<div class="shell">
+  <aside class="side">
+    <div class="brand">
+      <div class="brand-strip" aria-hidden="true">
+        <i style="--k:var(--eth);flex:14"></i><i style="--k:var(--ip);flex:20"></i><i style="--k:var(--udp);flex:8"></i><i style="--k:var(--gtp);flex:12"></i><i style="--k:var(--ext);flex:8"></i><i style="--k:var(--inner);flex:20"></i>
+      </div>
+      <span class="brand-name">gtpu-inspect</span>
+    </div>
+    <p class="status" id="status">Đang kiểm tra binary…</p>
+
+    <nav class="files" id="files" aria-label="File pcap"></nav>
+
+    <div class="side-actions">
+      <label class="btn btn-quiet file-btn">
+        Tải pcap lên
+        <input type="file" id="upload" accept=".pcap,.cap">
+      </label>
+      <form id="path-form" class="path-form">
+        <label for="path-input" class="sr-only">Đường dẫn pcap</label>
+        <input id="path-input" placeholder="~/lab/n3.pcap" spellcheck="false">
+        <button class="btn btn-quiet" type="submit">Mở</button>
+      </form>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="tabs" role="tablist" aria-label="Chế độ">
+      <button role="tab" id="tab-analyze" aria-controls="panel-analyze" aria-selected="true">Phân tích</button>
+      <button role="tab" id="tab-build" aria-controls="panel-build" aria-selected="false" tabindex="-1">Tạo gói</button>
+      <button role="tab" id="tab-compare" aria-controls="panel-compare" aria-selected="false" tabindex="-1">So sánh</button>
+      <button role="tab" id="tab-test" aria-controls="panel-test" aria-selected="false" tabindex="-1">Build &amp; test</button>
+    </div>
+
+    <!-- Phân tích -->
+    <section class="panel" id="panel-analyze" role="tabpanel" aria-labelledby="tab-analyze">
+      <header class="panel-head">
+        <div>
+          <h1 id="an-title">Chọn một file pcap</h1>
+          <p class="lede" id="an-lede">Chọn file ở cột trái để xem từng gói và lý do parser chấp nhận hay từ chối nó.</p>
+        </div>
+        <div class="head-actions">
+          <label class="inline-field">Top phiên <input id="an-top" type="number" min="0" max="1000" value="10"></label>
+          <button class="btn" id="an-run">Chạy lại</button>
+          <button class="btn btn-quiet" id="an-ws">Mở bằng Wireshark</button>
+        </div>
+      </header>
+      <div id="an-verdicts" class="verdicts"></div>
+      <div class="an-body">
+        <div class="pkt-wrap">
+          <div class="filter-note" id="an-filter-note" hidden></div>
+          <div class="table-scroll" id="an-table-scroll" tabindex="0" aria-label="Danh sách gói, dùng phím mũi tên để duyệt">
+            <table class="pkts" id="an-table">
+              <thead><tr><th class="num">#</th><th><span class="term" data-term="term.verdict">Verdict</span></th><th><span class="term" data-term="gtp.TEID">TEID</span></th><th><span class="term" data-term="gtp.Message type">Message</span></th><th class="num"><span class="term" data-term="ext.QFI">QFI</span></th><th><span class="term" data-term="layer.inner">IP bên trong</span></th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="detail" id="an-detail"></div>
+      </div>
+      <div class="an-foot" id="an-foot"></div>
+    </section>
+
+    <!-- Tạo gói -->
+    <section class="panel" id="panel-build" role="tabpanel" aria-labelledby="tab-build" hidden>
+      <header class="panel-head">
+        <div>
+          <h1>Tạo gói test</h1>
+          <p class="lede">Chỉnh từng trường, xem byte thay đổi và parser của bạn trả lời gì ngay khi gõ.</p>
+        </div>
+      </header>
+      <div class="build-body">
+        <form class="bform" id="bform" autocomplete="off">
+          <div class="plist" id="plist" aria-label="Các gói trong file"></div>
+
+          <fieldset>
+            <legend>Lớp ngoài: <span class="term" data-term="layer.ip">IPv4</span> + <span class="term" data-term="layer.udp">UDP</span></legend>
+            <div class="grid2">
+              <label>IP nguồn <input name="outer.src" placeholder="192.168.30.1"></label>
+              <label>IP đích <input name="outer.dst" placeholder="192.168.40.1"></label>
+              <label>Cổng nguồn <input name="outer.sport" inputmode="numeric" placeholder="2152"></label>
+              <label><span class="term" data-term="udp.Destination port">Cổng đích</span> <input name="outer.dport" inputmode="numeric" placeholder="2152"></label>
+            </div>
+          </fieldset>
+
+          <fieldset>
+            <legend><span class="term" data-term="layer.gtp">GTP-U</span></legend>
+            <div class="grid2">
+              <label><span class="term" data-term="gtp.TEID">TEID</span> <input name="gtp.teid" placeholder="0x1001" spellcheck="false"></label>
+              <label><span class="term" data-term="gtp.Message type">Message type</span>
+                <select name="gtp.msg_type">
+                  <option value="255">G-PDU (255)</option>
+                  <option value="1">Echo Request (1)</option>
+                  <option value="2">Echo Response (2)</option>
+                  <option value="26">Error Indication (26)</option>
+                  <option value="254">End Marker (254)</option>
+                </select>
+              </label>
+              <label class="check"><input type="checkbox" name="gtp.S"> <span><span class="term" data-term="gtp.S">Cờ S</span>, có sequence number</span></label>
+              <label><span class="term" data-term="gtp.Sequence number">Sequence</span> <input name="gtp.seq" inputmode="numeric" placeholder="0"></label>
+              <label class="check"><input type="checkbox" name="gtp.PN"> <span><span class="term" data-term="gtp.PN">Cờ PN</span>, có N-PDU number</span></label>
+              <label><span class="term" data-term="gtp.N-PDU number">N-PDU</span> <input name="gtp.npdu" inputmode="numeric" placeholder="0"></label>
+            </div>
+          </fieldset>
+
+          <fieldset>
+            <legend>Chuỗi <span class="term" data-term="layer.ext">extension header</span></legend>
+            <ol class="exts" id="exts"></ol>
+            <div class="row-btns">
+              <button type="button" class="btn btn-quiet" data-add-ext="pdu_ul">+ PDU Session UL</button>
+              <button type="button" class="btn btn-quiet" data-add-ext="pdu_dl">+ PDU Session DL</button>
+              <button type="button" class="btn btn-quiet" data-add-ext="udp_port">+ UDP Port</button>
+            </div>
+          </fieldset>
+
+          <fieldset>
+            <legend><span class="term" data-term="layer.inner">IP bên trong</span></legend>
+            <div class="grid2">
+              <label>Giao thức
+                <select name="inner.proto">
+                  <option value="udp">UDP</option>
+                  <option value="tcp">TCP</option>
+                  <option value="icmp">ICMP</option>
+                  <option value="none">Không có IP (byte thô)</option>
+                </select>
+              </label>
+              <label>Payload (byte) <input name="inner.size" inputmode="numeric" placeholder="12"></label>
+              <label>IP nguồn <input name="inner.src" placeholder="10.45.0.2"></label>
+              <label>IP đích <input name="inner.dst" placeholder="8.8.8.8"></label>
+            </div>
+          </fieldset>
+
+          <fieldset class="corrupt">
+            <legend>Phá hỏng</legend>
+            <div class="grid2">
+              <label>Cắt gói còn (byte) <input name="corrupt.truncate" inputmode="numeric" placeholder="giữ nguyên"></label>
+              <label>Ghi đè <span class="term" data-term="gtp.Length">GTP length</span> <input name="corrupt.gtp_length" inputmode="numeric" placeholder="tự tính"></label>
+              <label><span class="term" data-term="gtp.Version">GTP version</span> <input name="corrupt.version" inputmode="numeric" placeholder="1"></label>
+              <label><span class="term" data-term="gtp.PT">PT</span> <input name="corrupt.pt" inputmode="numeric" placeholder="1"></label>
+              <label class="check"><input type="checkbox" name="corrupt.ext_len_zero"> <span>Extension đầu tiên có <span class="term" data-term="ext.length">length</span> = 0</span></label>
+            </div>
+          </fieldset>
+
+          <div class="save-row">
+            <label>Tên file <input id="b-name" value="my_case" spellcheck="false"></label>
+            <button type="button" class="btn" id="b-save">Ghi pcap</button>
+            <button type="button" class="btn btn-quiet" id="b-analyze">Ghi rồi phân tích</button>
+            <button type="button" class="btn btn-quiet" id="b-ws">Mở bằng Wireshark</button>
+            <button type="button" class="btn btn-quiet" id="b-code">Xuất code fixture</button>
+          </div>
+          <p class="hint" id="b-saved" aria-live="polite"></p>
+        </form>
+        <div class="detail sticky" id="b-detail"></div>
+      </div>
+    </section>
+
+    <!-- So sánh -->
+    <section class="panel" id="panel-compare" role="tabpanel" aria-labelledby="tab-compare" hidden>
+      <header class="panel-head">
+        <div>
+          <h1 id="cmp-title">So sánh</h1>
+          <p class="lede" id="cmp-lede">Kết quả của bạn đặt cạnh file .expected và tshark.</p>
+        </div>
+        <div class="head-actions">
+          <label class="check"><input type="checkbox" id="cmp-only"> Chỉ hiện dòng lệch</label>
+          <button class="btn" id="cmp-run">So sánh lại</button>
+        </div>
+      </header>
+      <div id="cmp-body"></div>
+    </section>
+
+    <!-- Build & test -->
+    <section class="panel" id="panel-test" role="tabpanel" aria-labelledby="tab-test" hidden>
+      <header class="panel-head">
+        <div>
+          <h1>Build &amp; test</h1>
+          <p class="lede">Chạy cmake và ctest trong <code>build/</code>, giống vòng lặp trong ROADMAP.</p>
+        </div>
+        <div class="head-actions">
+          <label class="check"><input type="checkbox" id="t-san" checked> AddressSanitizer + UBSan</label>
+        </div>
+      </header>
+      <div class="row-btns">
+        <button class="btn" data-step="all">Build và chạy test</button>
+        <button class="btn btn-quiet" data-step="configure">Configure</button>
+        <button class="btn btn-quiet" data-step="build">Build</button>
+        <button class="btn btn-quiet" data-step="test">Chạy test</button>
+        <button class="btn btn-quiet" id="t-rerun" disabled>Chạy lại test lỗi</button>
+      </div>
+      <div class="test-body">
+        <div>
+          <div class="t-summary" id="t-summary"></div>
+          <div class="t-grid" id="t-grid"></div>
+          <label class="t-filter">Lọc theo tên <input id="t-filter" placeholder="Parser, Ring…" spellcheck="false"></label>
+          <ul class="t-list" id="t-list"></ul>
+        </div>
+        <pre class="log" id="t-log" aria-live="polite" tabindex="0">Log của lệnh sẽ hiện ở đây.</pre>
+      </div>
+    </section>
+  </main>
+</div>
+
+<dialog id="code-dlg">
+  <form method="dialog">
+    <h2>Code fixture</h2>
+    <p class="hint">Dán vào <code>tools/gen_pcaps.py</code>, sửa verdict và ghi chú cho đúng, thêm vào <code>FIXTURES</code>, rồi chạy <code>cmake --build build -t fixtures</code>.</p>
+    <pre id="code-out"></pre>
+    <div class="row-btns">
+      <button type="button" class="btn" id="code-copy">Chép code</button>
+      <button class="btn btn-quiet">Đóng</button>
+    </div>
+  </form>
+</dialog>
+
+<div class="tip" id="tip" role="tooltip" hidden></div>
+<aside class="gloss" id="gloss" aria-labelledby="gloss-title" hidden>
+  <div class="gloss-head">
+    <div>
+      <p class="gloss-layer" id="gloss-layer"></p>
+      <h2 id="gloss-title"></h2>
+    </div>
+    <button type="button" class="btn btn-quiet" id="gloss-close" aria-label="Đóng chú giải">Đóng</button>
+  </div>
+  <div class="gloss-body" id="gloss-body"></div>
+</aside>
+
+<script src="/static/glossary.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
