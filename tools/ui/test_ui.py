@@ -4,6 +4,7 @@
 """
 
 import json
+import os
 
 import builder
 import dissect
@@ -269,5 +270,22 @@ def test_parse_keeps_totals_when_packets_capped():
 def test_test_filter_only_reaches_ctest():
     server = pytest.importorskip("server")
     assert "-R" not in server._step_cmd("build", False, "Ring")
-    assert server._step_cmd("test", False, "Ring")[-2:] == ["-R", "Ring"]
+    cmd = server._step_cmd("test", False, "Ring")
+    assert cmd[-2:] == ["-R", "Ring"] and str(server.JUNIT_RERUN) in cmd
     assert "-R" not in server._step_cmd("test", False)
+
+
+def test_rerun_results_overlay_full_run(tmp_path, monkeypatch):
+    server = pytest.importorskip("server")
+    full, rerun = tmp_path / "ctest.xml", tmp_path / "ctest-rerun.xml"
+    case = '<testcase name="{}" status="run">{}</testcase>'
+    full.write_text("<testsuite>" + case.format("A", "<failure/>")
+                    + case.format("B", "") + "</testsuite>")
+    rerun.write_text("<testsuite>" + case.format("A", "") + "</testsuite>")
+    os.utime(full, (1, 1))
+    monkeypatch.setattr(server, "JUNIT", full)
+    monkeypatch.setattr(server, "JUNIT_RERUN", rerun)
+    got = {t["name"]: t["status"] for t in server.tests()["tests"]}
+    assert got == {"A": "pass", "B": "pass"}
+    os.utime(rerun, (0, 0))  # bản chạy lại cũ hơn lần chạy đủ: bỏ qua
+    assert {t["name"]: t["status"] for t in server.tests()["tests"]}["A"] == "fail"

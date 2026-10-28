@@ -32,10 +32,13 @@ DATA = ROOT / "tests" / "data"
 WORK = runner.BUILD / "ui"
 STATIC = Path(__file__).resolve().parent / "static"
 JUNIT = WORK / "ctest.xml"
+# Lần chạy lại có bộ lọc -R ghi riêng, để ctest.xml vẫn đủ mọi test.
+JUNIT_RERUN = WORK / "ctest-rerun.xml"
 MAX_UPLOAD = 256 * 1024 * 1024
 
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 _run_lock = asyncio.Lock()
+_preview_lock = asyncio.Lock()  # mọi bản xem trước dùng chung .preview.pcap
 _allowed_hosts = set()
 
 
@@ -159,12 +162,16 @@ async def build(request: Request):
     specs, index = body.get("packets", []), int(body.get("index", 0))
     if not 0 <= index < len(specs):
         raise HTTPException(400, "index không hợp lệ")
-    try:
-        frames = builder.write(WORK / ".preview.pcap", specs)
-    except ValueError as e:
-        return {"error": str(e)}
+    # Dựng gói và chạy binary trong thread: không chặn các request khác,
+    # nhất là luồng log build đang chạy.
+    async with _preview_lock:
+        try:
+            frames = await asyncio.to_thread(builder.write,
+                                             WORK / ".preview.pcap", specs)
+        except ValueError as e:
+            return {"error": str(e)}
+        res = await asyncio.to_thread(runner.analyze, WORK / ".preview.pcap", 10)
     out = dissect.dissect(frames[index])
-    res = runner.analyze(WORK / ".preview.pcap", 10)
     pkts = res.get("packets", [])
     verdict = pkts[index]["result"] if index < len(pkts) else None
     out.update({"verdict": verdict, "binary_error": res.get("error"),
@@ -218,8 +225,9 @@ def _step_cmd(step, sanitize, test_filter=None):
     if step == "build":
         return ["cmake", "--build", str(runner.BUILD), "-j"]
     if step == "test":
+        junit = JUNIT_RERUN if test_filter else JUNIT
         cmd = ["ctest", "--test-dir", str(runner.BUILD),
-               "--output-on-failure", "--output-junit", str(JUNIT)]
+               "--output-on-failure", "--output-junit", str(junit)]
         return cmd + ["-R", test_filter] if test_filter else cmd
     raise HTTPException(400, f"bước không hợp lệ: {step}")
 
@@ -278,13 +286,9 @@ async def run(request: Request):
     return StreamingResponse(locked(), media_type="text/plain; charset=utf-8")
 
 
-@app.get("/api/tests")
-def tests():
-    if not JUNIT.exists():
-        return {"tests": [], "time": None}
-    root = ET.parse(JUNIT).getroot()
-    out = []
-    for tc in root.iter("testcase"):
+def _read_junit(path):
+    out = {}
+    for tc in ET.parse(path).getroot().iter("testcase"):
         state = tc.get("status") or "run"
         if tc.find("failure") is not None or tc.find("error") is not None:
             state = "fail"
@@ -292,9 +296,22 @@ def tests():
             state = "skip"
         else:
             state = "pass"
-        out.append({"name": tc.get("name"), "status": state,
-                    "time": float(tc.get("time") or 0)})
-    return {"tests": out, "time": JUNIT.stat().st_mtime}
+        out[tc.get("name")] = {"name": tc.get("name"), "status": state,
+                               "time": float(tc.get("time") or 0)}
+    return out
+
+
+@app.get("/api/tests")
+def tests():
+    if not JUNIT.exists():
+        return {"tests": [], "time": None}
+    out = _read_junit(JUNIT)
+    stamp = JUNIT.stat().st_mtime
+    # Kết quả chạy lại mới hơn lần chạy đủ thì đè lên đúng các test đó.
+    if JUNIT_RERUN.exists() and JUNIT_RERUN.stat().st_mtime > stamp:
+        out.update(_read_junit(JUNIT_RERUN))
+        stamp = JUNIT_RERUN.stat().st_mtime
+    return {"tests": list(out.values()), "time": stamp}
 
 
 app.mount("/static", StaticFiles(directory=STATIC), name="static")

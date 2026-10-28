@@ -372,10 +372,15 @@ $("#files").addEventListener("click", (e) => {
 $("#upload").addEventListener("change", async (e) => {
   const f = e.target.files[0];
   if (!f) return;
-  const r = await api("/api/upload?" + q({ name: f.name }), f, true);
-  e.target.value = "";
-  await loadFiles();
-  selectFile(r.path);
+  try {
+    const r = await api("/api/upload?" + q({ name: f.name }), f, true);
+    await loadFiles();
+    selectFile(r.path);
+  } catch (err) {
+    flash(`Không tải lên được ${f.name}: ${err.message}`);
+  } finally {
+    e.target.value = ""; // chọn lại đúng file đó vẫn kích hoạt change
+  }
 });
 
 $("#path-form").addEventListener("submit", (e) => {
@@ -384,19 +389,22 @@ $("#path-form").addEventListener("submit", (e) => {
   if (p) selectFile(p);
 });
 
-// URL luôn chỉ đúng file và tab đang xem: tải lại trang hay chép link đều ra đúng chỗ.
+// URL luôn chỉ đúng file, gói và tab đang xem: tải lại trang hay chép link đều ra đúng chỗ.
 function syncUrl() {
-  history.replaceState(null, "", location.pathname + (S.file ? "?" + q({ file: S.file }) : "") + "#" + (S.tab || "analyze"));
+  const params = S.file ? "?" + q({ file: S.file, idx: S.sel }) : "";
+  history.replaceState(null, "", location.pathname + params + "#" + (S.tab || "analyze"));
 }
 
 function selectFile(path) {
   S.file = path; store.set("file", path);
-  syncUrl();
   S.sel = 0; S.filter = null;
+  syncUrl();
   $$("#files button").forEach((b) => (b.dataset.path === path
     ? b.setAttribute("aria-current", "true") : b.removeAttribute("aria-current")));
+  // Tab đang ẩn không cần nạp: showTab tự nạp lại khi chuyển sang.
   if (S.tab === "compare") loadCompare();
-  if (S.tab === "build") showTab("analyze"); else loadAnalysis();
+  else if (S.tab === "analyze") loadAnalysis();
+  else if (S.tab === "build") showTab("analyze");
 }
 
 /* ================= tabs ================= */
@@ -547,6 +555,7 @@ async function loadPacket() {
   const p = (S.analysis?.packets || []).find((x) => x.idx === S.sel);
   const box = $("#an-detail");
   if (!p) { renderPacket(box, null); return; }
+  syncUrl();
   try {
     const d = await api("/api/packet?" + q({ path: S.file, idx: p.idx, verdict: p.result }));
     if (seq !== pkSeq) return;
@@ -792,6 +801,11 @@ let running = false, lastFailed = [];
 const log = $("#t-log");
 
 async function runStep(step, filter) {
+  try { return await streamStep(step, filter); }
+  catch (e) { log.textContent += `\nMất kết nối tới server: ${e.message}\n`; return 1; }
+}
+
+async function streamStep(step, filter) {
   const r = await fetch("/api/run", {
     method: "POST",
     headers: { "X-GTPU-UI": "1", "Content-Type": "application/json" },
