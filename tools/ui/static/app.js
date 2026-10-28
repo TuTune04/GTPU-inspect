@@ -384,8 +384,14 @@ $("#path-form").addEventListener("submit", (e) => {
   if (p) selectFile(p);
 });
 
+// URL luôn chỉ đúng file và tab đang xem: tải lại trang hay chép link đều ra đúng chỗ.
+function syncUrl() {
+  history.replaceState(null, "", location.pathname + (S.file ? "?" + q({ file: S.file }) : "") + "#" + (S.tab || "analyze"));
+}
+
 function selectFile(path) {
   S.file = path; store.set("file", path);
+  syncUrl();
   S.sel = 0; S.filter = null;
   $$("#files button").forEach((b) => (b.dataset.path === path
     ? b.setAttribute("aria-current", "true") : b.removeAttribute("aria-current")));
@@ -398,7 +404,7 @@ function selectFile(path) {
 const TABS = ["analyze", "build", "compare", "test"];
 function showTab(name) {
   S.tab = name; store.set("tab", name);
-  history.replaceState(null, "", location.pathname + location.search + "#" + name);
+  syncUrl();
   for (const t of TABS) {
     const on = t === name;
     const btn = $("#tab-" + t);
@@ -430,6 +436,14 @@ function noBinary(box) {
     <button class="btn" type="button" onclick="showTab('test')">Mở Build &amp; test</button></div>`;
 }
 
+// Xóa bảng, chi tiết, chân trang: không để lại gói của file trước khi file mới lỗi.
+function clearAnalysis(lede) {
+  S.analysis = null;
+  $("#an-lede").textContent = lede;
+  for (const id of ["#an-verdicts", "#an-table tbody", "#an-detail", "#an-foot"]) $(id).innerHTML = "";
+  $("#an-filter-note").hidden = true;
+}
+
 let anSeq = 0;
 async function loadAnalysis() {
   const seq = ++anSeq;
@@ -437,22 +451,21 @@ async function loadAnalysis() {
   let res;
   try { res = await api("/api/analyze?" + q({ path: S.file, top: $("#an-top").value || 10 })); }
   catch (e) {
-    $("#an-lede").textContent = e.message;
-    $("#an-verdicts").innerHTML = ""; $("#an-table tbody").innerHTML = ""; $("#an-detail").innerHTML = ""; $("#an-foot").innerHTML = "";
+    if (seq === anSeq) clearAnalysis(e.message);
     return;
   }
   if (seq !== anSeq) return;
-  S.analysis = res;
   if (res.error === "no_binary") {
-    $("#an-lede").textContent = "";
-    $("#an-verdicts").innerHTML = ""; $("#an-table tbody").innerHTML = ""; $("#an-foot").innerHTML = "";
+    clearAnalysis("");
     noBinary($("#an-detail"));
     return;
   }
   if (res.error) {
+    clearAnalysis("");
     $("#an-verdicts").innerHTML = `<div class="err-box">Không đọc được output của binary: ${esc(res.detail)}<pre>${esc(res.stdout?.slice(0, 2000))}</pre></div>`;
     return;
   }
+  S.analysis = res;
   const pk = res.packets, sm = res.summary || {};
   const cnt = { ok: 0, ign: 0, err: 0 };
   for (const p of pk) cnt[vClass(p.result).slice(2)]++;
@@ -492,9 +505,11 @@ function visiblePackets() {
 function renderTable() {
   const vis = visiblePackets();
   const note = $("#an-filter-note");
-  note.hidden = !S.filter && vis.length <= TABLE_CAP;
+  const cut = S.analysis?.truncated;
+  note.hidden = !S.filter && !cut && vis.length <= TABLE_CAP;
   note.innerHTML = (S.filter ? `Đang lọc <b>${esc(S.filter)}</b>: ${fmtN(vis.length)} gói. <button type="button" id="clear-filter">Bỏ lọc</button> ` : "")
-    + (vis.length > TABLE_CAP ? `Chỉ hiện ${fmtN(TABLE_CAP)} gói đầu.` : "");
+    + (cut ? `Chi tiết chỉ có cho ${fmtN(S.analysis.packets.length)} gói đầu trên tổng ${fmtN(S.analysis.summary.packets)}; thanh verdict và bảng phiên tính trên cả file.`
+      : vis.length > TABLE_CAP ? `Chỉ hiện ${fmtN(TABLE_CAP)} gói đầu.` : "");
   const cf = $("#clear-filter");
   if (cf) cf.onclick = () => { S.filter = null; $$(".vchip").forEach((b) => b.setAttribute("aria-pressed", "false")); renderTable(); };
   if (vis.length && !vis.some((p) => p.idx === S.sel)) S.sel = vis[0].idx;
@@ -566,9 +581,13 @@ $("#an-ws").addEventListener("click", () => openWireshark(S.file));
 async function openWireshark(path) {
   try { await api("/api/wireshark", { path }); } catch (e) { flash(e.message); }
 }
+let toastTimer = 0;
 function flash(msg) {
-  const el = $("#b-saved");
+  const el = $("#toast");
   el.textContent = msg;
+  el.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.hidden = true; }, 6000);
 }
 
 /* ================= tab tạo gói ================= */
@@ -734,6 +753,7 @@ function renderCompare() {
   if (!c.has_expected) notes.push("File này không có .expected, chỉ so với tshark.");
   if (c.format === "text") notes.push("Binary chưa có -j nên chưa so QFI từng gói.");
   if (c.tshark_error) notes.push("Không chạy được tshark.");
+  if (c.truncated) notes.push(`Chỉ so ${fmtN(n)} gói đầu.`);
   notes.push("tshark chỉ được so ở gói mà parser của bạn chấp nhận.");
   const only = $("#cmp-only").checked;
   const rows = c.rows.filter((r) => !only || r.diff.length);

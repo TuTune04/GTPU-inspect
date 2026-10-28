@@ -21,6 +21,10 @@ _SESSION_RE = re.compile(
     r"^0x([0-9a-fA-F]+)\s+(\S+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s*$")
 _COUNT_RE = re.compile(r"^(.*?)\s+(\d+)$")
 
+# shortcut: chỉ giữ chi tiết MAX_PACKETS gói đầu (bảng cũng chỉ hiện chừng
+# đó); tổng số gói vẫn đúng. Cần phân trang khi muốn duyệt hết file lớn.
+MAX_PACKETS = 3000
+
 _json_support = {}  # mtime của binary -> binary có hỗ trợ -j không
 
 
@@ -28,7 +32,7 @@ def _int_or_none(s):
     return None if s in (None, "-", "") else int(s)
 
 
-def parse_text(stdout):
+def parse_text(stdout, limit=MAX_PACKETS):
     """Đọc output `gtpu-inspect -v` (định dạng text hiện tại)."""
     packets = []
     summary = {"packets": 0, "bytes": 0, "results": {}, "msg_types": {},
@@ -36,6 +40,8 @@ def parse_text(stdout):
     section = None
     for line in stdout.splitlines():
         m = _PKT_RE.match(line)
+        if m and len(packets) >= limit:
+            continue
         if m:
             idx, verdict, teid, name, src, dst = m.groups()
             name = name.strip() if name else None
@@ -83,7 +89,7 @@ def parse_text(stdout):
     return packets, summary
 
 
-def parse_ndjson(stdout):
+def parse_ndjson(stdout, limit=MAX_PACKETS):
     """Đọc output `gtpu-inspect -j` (xem docs/ui-design.md)."""
     packets, summary = [], {}
     for line in stdout.splitlines():
@@ -91,7 +97,7 @@ def parse_ndjson(stdout):
             continue
         obj = json.loads(line)
         kind = obj.pop("type", None)
-        if kind == "packet":
+        if kind == "packet" and len(packets) < limit:
             packets.append(obj)
         elif kind == "summary":
             summary = obj
@@ -119,6 +125,7 @@ def analyze(pcap, top=10):
         return {"error": "bad_output", "detail": str(e), "stdout": r.stdout,
                 "stderr": r.stderr, "rc": r.returncode}
     return {"format": "json" if use_json else "text", "packets": packets,
+            "truncated": summary.get("packets", 0) > len(packets),
             "summary": summary, "stderr": r.stderr, "rc": r.returncode,
             "command": " ".join(args[:-1] + [Path(pcap).name])}
 
@@ -154,7 +161,8 @@ def tshark(pcap):
     exe = shutil.which("tshark")
     if exe is None:
         return {"error": "no_tshark"}
-    args = [exe, "-r", str(pcap), "-T", "fields", "-E", "occurrence=f",
+    args = [exe, "-r", str(pcap), "-c", str(MAX_PACKETS), "-T", "fields",
+            "-E", "occurrence=f",
             "-E", "separator=\t"]
     for f in TSHARK_FIELDS:
         args += ["-e", f]
@@ -175,6 +183,8 @@ def tshark(pcap):
 def compare(pcap):
     ours = analyze(pcap)
     exp = read_expected(pcap)
+    if exp:
+        exp["rows"] = exp["rows"][:MAX_PACKETS]
     ts = tshark(pcap)
     n = max(len(ours.get("packets", [])),
             len(exp["rows"]) if exp else 0, len(ts.get("rows", [])))
@@ -208,4 +218,5 @@ def compare(pcap):
             "file": exp["file"] if exp else None,
             "has_expected": exp is not None, "ours_rc": ours.get("rc"),
             "ours_stderr": ours.get("stderr"), "ours_error": ours.get("error"),
-            "format": ours.get("format"), "tshark_error": ts.get("error")}
+            "format": ours.get("format"), "tshark_error": ts.get("error"),
+            "truncated": ours.get("truncated", False)}

@@ -6,11 +6,14 @@ Chỉ nghe 127.0.0.1. Xem docs/ui-design.md.
 """
 
 import argparse
+import asyncio
+import codecs
+import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
-import threading
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -32,7 +35,7 @@ JUNIT = WORK / "ctest.xml"
 MAX_UPLOAD = 256 * 1024 * 1024
 
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
-_run_lock = threading.Lock()
+_run_lock = asyncio.Lock()
 _allowed_hosts = set()
 
 
@@ -108,12 +111,25 @@ def files():
 
 @app.post("/api/upload")
 async def upload(request: Request, name: str):
-    body = await request.body()
-    if len(body) > MAX_UPLOAD:
-        raise HTTPException(413, "file quá lớn (tối đa 256 MB)")
+    too_big = HTTPException(413, f"file quá lớn (tối đa {MAX_UPLOAD >> 20} MB)")
+    if int(request.headers.get("content-length") or 0) > MAX_UPLOAD:
+        raise too_big
     dest = WORK / "uploads" / _safe_name(name, "upload")
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(body)
+    # Ghi theo khúc vào .part: không giữ cả file trong RAM, và file đích chỉ
+    # xuất hiện khi đã nhận đủ (kể cả request không có content-length).
+    part = dest.with_name(dest.name + ".part")
+    size = 0
+    try:
+        with open(part, "wb") as f:
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > MAX_UPLOAD:
+                    raise too_big
+                f.write(chunk)
+        part.replace(dest)
+    finally:
+        part.unlink(missing_ok=True)
     return {"path": _rel(dest)}
 
 
@@ -195,42 +211,71 @@ async def wireshark(request: Request):
     return {"ok": True}
 
 
-def _step_cmd(step, sanitize):
+def _step_cmd(step, sanitize, test_filter=None):
     if step == "configure":
         return ["cmake", "-B", str(runner.BUILD),
                 f"-DGTPU_SANITIZE={'ON' if sanitize else 'OFF'}"]
     if step == "build":
         return ["cmake", "--build", str(runner.BUILD), "-j"]
     if step == "test":
-        return ["ctest", "--test-dir", str(runner.BUILD),
-                "--output-on-failure", "--output-junit", str(JUNIT)]
+        cmd = ["ctest", "--test-dir", str(runner.BUILD),
+               "--output-on-failure", "--output-junit", str(JUNIT)]
+        return cmd + ["-R", test_filter] if test_filter else cmd
     raise HTTPException(400, f"bước không hợp lệ: {step}")
+
+
+async def _stream(cmd):
+    """Chạy cmd, trả output theo từng khúc. Client ngắt kết nối thì Starlette
+    hủy generator; khối finally dừng cả nhóm tiến trình (cmake và make/gcc
+    con của nó), để không còn build mồ côi chạy chồng lên lần build sau."""
+    yield "$ " + " ".join(cmd) + "\n"
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, cwd=ROOT, stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT, start_new_session=True)
+    decode = codecs.getincrementaldecoder("utf-8")(errors="replace").decode
+    try:
+        while chunk := await proc.stdout.read(4096):
+            yield decode(chunk)
+        yield decode(b"", final=True) + f"\n[exit {await proc.wait()}]\n"
+    finally:
+        if proc.returncode is None:
+            await _stop_group(proc)
+
+
+async def _stop_group(proc):
+    # SIGTERM trước để make kịp xóa file object ghi dở, sau 5 s mới SIGKILL.
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(proc.pid, sig)
+        except ProcessLookupError:
+            return
+        try:
+            await asyncio.wait_for(proc.wait(), 5)
+            return
+        except asyncio.TimeoutError:
+            pass
 
 
 @app.post("/api/run")
 async def run(request: Request):
     body = await request.json()
-    cmd = _step_cmd(body.get("step"), bool(body.get("sanitize")))
-    if body.get("filter"):
-        cmd += ["-R", body["filter"]]
-    if not _run_lock.acquire(blocking=False):
+    cmd = _step_cmd(body.get("step"), bool(body.get("sanitize")),
+                    body.get("filter"))
+    if _run_lock.locked():
         raise HTTPException(409, "đang có một lệnh khác chạy")
     WORK.mkdir(parents=True, exist_ok=True)
 
-    def stream():
-        try:
-            yield "$ " + " ".join(cmd) + "\n"
-            proc = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE,
-                                    stderr=subprocess.STDOUT, text=True,
-                                    bufsize=1)
-            for line in proc.stdout:
-                yield line
-            proc.wait()
-            yield f"\n[exit {proc.returncode}]\n"
-        finally:
-            _run_lock.release()
+    async def locked():
+        # Giữ khóa ngay trong generator: client ngắt ở bất kỳ lúc nào thì
+        # async with cũng nhả khóa; không có cửa sổ nào khóa bị kẹt.
+        if _run_lock.locked():
+            yield "đang có một lệnh khác chạy\n[exit 409]\n"
+            return
+        async with _run_lock:
+            async for chunk in _stream(cmd):
+                yield chunk
 
-    return StreamingResponse(stream(), media_type="text/plain; charset=utf-8")
+    return StreamingResponse(locked(), media_type="text/plain; charset=utf-8")
 
 
 @app.get("/api/tests")

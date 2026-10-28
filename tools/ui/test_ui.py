@@ -253,3 +253,21 @@ def _check_against_tshark(pcap):
             assert mine == got[:len(mine)], f"gói {i} {k}: ours={mine} tshark={got}"
             checked += len(mine)
     assert checked > 0
+
+
+def test_parse_keeps_totals_when_packets_capped():
+    pk, sm = runner.parse_text(TEXT_OUT, limit=2)
+    assert [p["idx"] for p in pk] == [0, 1]
+    assert sm["packets"] == 3 and sm["results"]["ok"] == 2
+    lines = [json.dumps({"type": "packet", "idx": i, "result": "ok"})
+             for i in range(5)]
+    lines.append(json.dumps({"type": "summary", "packets": 5}))
+    pk, sm = runner.parse_ndjson("\n".join(lines), limit=3)
+    assert len(pk) == 3 and sm["packets"] == 5
+
+
+def test_test_filter_only_reaches_ctest():
+    server = pytest.importorskip("server")
+    assert "-R" not in server._step_cmd("build", False, "Ring")
+    assert server._step_cmd("test", False, "Ring")[-2:] == ["-R", "Ring"]
+    assert "-R" not in server._step_cmd("test", False)

@@ -227,7 +227,6 @@ td.mono, td .mono { font-family: var(--mono); }
 .oct-bit, .oct-num { font-family: var(--mono); font-size: 11px; color: var(--ink-3); display: flex; align-items: center; justify-content: center; }
 .oct-bit { border-bottom: 1px solid var(--ink); min-height: 22px; }
 .oct-num { border-right: 1px solid var(--ink); }
-.oct-row-line { grid-column: 2 / -1; border-top: 1px dotted var(--rule); pointer-events: none; }
 .field {
   border-right: 1px solid var(--ink); border-bottom: 1px solid var(--ink);
   padding: 3px 6px; display: flex; flex-direction: column; justify-content: center; align-items: center;
@@ -403,3 +402,12 @@ dialog pre { background: var(--sheet); border: 1px solid var(--rule); padding: 1
 .gloss-see button { all: unset; cursor: pointer; font-size: var(--s1); padding: 3px 10px; border: 1px solid var(--rule-strong); border-radius: 999px; }
 .gloss-see button:hover { background: var(--sheet); }
 .gloss-see button:focus-visible { outline: 2px solid var(--focus); }
+
+/* ---------- thông báo lỗi dùng chung ---------- */
+.toast {
+  position: fixed; z-index: 60; left: 50%; bottom: 20px; transform: translateX(-50%);
+  max-width: min(560px, calc(100vw - 32px));
+  background: var(--bad); color: #fff; border-radius: 6px; padding: 10px 14px;
+  font-size: var(--s1); box-shadow: 0 6px 20px rgb(10 14 22 / 0.25);
+}
+@media (prefers-color-scheme: dark) { .toast { color: #1A0D0A; } }
