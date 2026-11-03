@@ -86,7 +86,8 @@
 /* Ô pool chứa vừa gói <= 2048 byte (MTU 1500 + outer header còn dư). Gói
  * lớn hơn, hoặc khi tắt mempool, cấp riêng bằng malloc đúng caplen. */
 #define POOL_DATA_LEN 2048u
-#define TABLE_INITIAL_CAPACITY 1024u/* TEID nằm ở byte 4-7 của header GTP-U. */
+#define TABLE_INITIAL_CAPACITY 1024u
+#define DRAIN_EVERY 32u        /* lũy thừa 2 *//* TEID nằm ở byte 4-7 của header GTP-U. */
 #define GTPU_OFF_TEID 4u
 
 struct pkt_buf {
@@ -241,6 +242,7 @@ int pipeline_run(const struct pipeline_config *cfg, struct pipeline_result *res)
     struct timespec t0, t1;
     _Atomic bool done;
     unsigned n, i, started = 0;
+    uint64_t reads = 0;
     enum pcap_status st;
     int rc = -1;
 
@@ -295,8 +297,14 @@ int pipeline_run(const struct pipeline_config *cfg, struct pipeline_result *res)
     {
         uint32_t teid;
         unsigned w = 0;   /* gói không đọc được TEID: worker 0 */
-        struct pkt_buf *b = get_buf(ws, n, pool, pkt.caplen);
+        struct pkt_buf *b;
 
+        /* Rút free_ring đều đặn chứ không đợi pool cạn: free list LIFO khi đó
+         * cấp lại buffer vừa dùng, còn nóng trong cache. Đợi cạn thì reader
+         * quay vòng qua cả pool (4096 x N ô, hàng chục MB > L3). */
+        if ((++reads & (DRAIN_EVERY - 1u)) == 0)
+            drain_free(ws, n, pool);
+        b = get_buf(ws, n, pool, pkt.caplen);
         if (b == NULL)
         {
             rc = -1;
