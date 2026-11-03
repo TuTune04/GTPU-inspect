@@ -69,9 +69,14 @@
  * tail, hai core không tranh nhau cùng một line. */
 #define RING_CACHE_LINE 64
 
+/* tail_cache / head_cache: bản sao cục bộ chỉ số của bên kia, nằm chung line
+ * với chỉ số của chính mình. Chỉ load chỉ số thật (kéo cache line từ core
+ * kia về) khi bản sao báo đầy/rỗng, thay vì mỗi gói một lần. */
 struct ring {
     _Alignas(RING_CACHE_LINE) _Atomic size_t head;  /* chỉ producer ghi */
+    size_t tail_cache;                              /* producer riêng */
     _Alignas(RING_CACHE_LINE) _Atomic size_t tail;  /* chỉ consumer ghi */
+    size_t head_cache;                              /* consumer riêng */
     _Alignas(RING_CACHE_LINE) size_t mask;          /* capacity - 1 */
     void **slots;
 };
@@ -98,6 +103,8 @@ struct ring *ring_create(size_t capacity)
     }
     atomic_init(&r->head, 0);
     atomic_init(&r->tail, 0);
+    r->tail_cache = 0;
+    r->head_cache = 0;
     r->mask = capacity - 1u;
     return r;
 }
@@ -115,12 +122,17 @@ void ring_destroy(struct ring *r)
 bool ring_push(struct ring *r, void *item)
 {
     size_t h = atomic_load_explicit(&r->head, memory_order_relaxed);
-    /* acquire: cặp với release trong ring_pop. Consumer đọc xong slot rồi
-     * mới công bố tail mới, nên ghi đè slot đó ở đây là an toàn. */
-    size_t t = atomic_load_explicit(&r->tail, memory_order_acquire);
 
-    if (h - t > r->mask)
-        return false;
+    if (h - r->tail_cache > r->mask)
+    {
+        /* acquire: cặp với release trong ring_pop. Consumer đọc xong slot
+         * rồi mới công bố tail mới, nên ghi đè slot đó ở đây là an toàn.
+         * tail_cache cũ hơn tail thật nên chỉ có thể báo đầy sai, không
+         * bao giờ cho ghi đè slot chưa đọc. */
+        r->tail_cache = atomic_load_explicit(&r->tail, memory_order_acquire);
+        if (h - r->tail_cache > r->mask)
+            return false;
+    }
     r->slots[h & r->mask] = item;
     /* release: ghi slot phía trên phải được thấy trước head mới. */
     atomic_store_explicit(&r->head, h + 1u, memory_order_release);
@@ -131,10 +143,15 @@ bool ring_push(struct ring *r, void *item)
 bool ring_pop(struct ring *r, void **item)
 {
     size_t t = atomic_load_explicit(&r->tail, memory_order_relaxed);
-    size_t h = atomic_load_explicit(&r->head, memory_order_acquire);
 
-    if (h == t)
-        return false;
+    if (t == r->head_cache)
+    {
+        /* acquire cặp với release của producer; head_cache chỉ lưu giá trị
+         * đã acquire nên slot trước nó chắc chắn đã được ghi xong. */
+        r->head_cache = atomic_load_explicit(&r->head, memory_order_acquire);
+        if (t == r->head_cache)
+            return false;
+    }
     *item = r->slots[t & r->mask];
     atomic_store_explicit(&r->tail, t + 1u, memory_order_release);
     return true;
