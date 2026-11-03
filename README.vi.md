@@ -16,8 +16,10 @@ giải mã chồng giao thức Ethernet → IPv4 → UDP → GTP-U → IP bên t
   (gồm PDU Session Container / QFI của 5G), G-PDU, Echo, Error Indication, End Marker
 - Bảng phiên theo TEID (hash table open addressing) đếm gói và byte
 - Kiểm tra biên chặt chẽ: gói lỗi được đếm theo từng loại lỗi, không bao giờ tin dữ liệu đầu vào
-- *(dự kiến)* Pipeline nhiều worker, chia gói theo TEID, ring buffer SPSC không khóa
-- *(dự kiến)* Memory pool kích thước cố định và benchmark thông lượng
+- Pipeline nhiều worker (`-w N`), chia gói theo TEID, ring buffer SPSC không khóa;
+  kết quả giống hệt chế độ tuần tự
+- Memory pool kích thước cố định và benchmark thông lượng: 6.6 Mpps tuần tự trên
+  i5-1135G7; pipeline chậm hơn với tải nhẹ này (xem [bench/README.md](bench/README.md))
 
 ### Chất lượng
 - Build với `-Wall -Wextra -Werror -std=c11` trên GCC và Clang
