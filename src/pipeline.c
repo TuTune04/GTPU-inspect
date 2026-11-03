@@ -26,6 +26,14 @@
  *   Reader set done (release) SAU khi push gói cuối; worker thấy done
  *   (acquire) thì pop lại một lần nữa rồi mới thoát.
  *
+ * v2: ĐẨY THEO LÔ
+ *   Một push/pop mỗi gói nghĩa là mỗi gói một lần cache line head/tail đổi
+ *   chủ giữa hai core. Reader gom cfg->batch offset cho từng worker rồi
+ *   ring_push_bulk một lần; worker ring_pop_bulk tối đa WORKER_POP_MAX.
+ *   Lô của reader nằm trong mảng batches riêng, KHÔNG nằm trong struct
+ *   worker: reader ghi lô liên tục, worker ghi stats liên tục, chung cache
+ *   line là false sharing.
+ *
  * RING ĐẦY / RỖNG
  *   Ring đầy: reader sched_yield() rồi thử lại. Ring rỗng: worker tương tự.
  */
@@ -46,6 +54,7 @@
 #include "ring.h"
 
 #define TABLE_INITIAL_CAPACITY 1024u
+#define WORKER_POP_MAX 64u
 /* TEID nằm ở byte 4-7 của header GTP-U. */
 #define GTPU_OFF_TEID 4u
 
@@ -58,6 +67,12 @@ struct worker {
     uint64_t               dropped_sessions;
     double                 cpu_sec;   /* CPU của riêng luồng này */
     const _Atomic bool    *done;
+};
+
+/* Lô offset reader đang gom cho một worker. Chỉ reader chạm vào. */
+struct batch {
+    void  *items[PIPELINE_MAX_BATCH];
+    size_t n;
 };
 
 static double ts_sec(const struct timespec *t)
@@ -133,28 +148,46 @@ static void process(struct worker *w, size_t off)
 static void *worker_main(void *arg)
 {
     struct worker *w = arg;
-    void *item;
+    void *items[WORKER_POP_MAX];
+    size_t k, i;
 
     for (;;)
     {
-        if (ring_pop(w->rx, &item))
+        k = ring_pop_bulk(w->rx, items, WORKER_POP_MAX);
+        if (k == 0)
         {
-            process(w, item_to_off(item));
-            continue;
-        }
-        /* Reader set done SAU khi push gói cuối (release). Thấy done thì
-         * pop lại một lần nữa mới chắc ring đã thật sự rỗng. */
-        if (atomic_load_explicit(w->done, memory_order_acquire))
-        {
-            if (!ring_pop(w->rx, &item))
+            /* Reader set done SAU khi push gói cuối (release). Thấy done thì
+             * pop lại một lần nữa mới chắc ring đã thật sự rỗng. */
+            if (!atomic_load_explicit(w->done, memory_order_acquire))
+            {
+                sched_yield();
+                continue;
+            }
+            k = ring_pop_bulk(w->rx, items, WORKER_POP_MAX);
+            if (k == 0)
                 break;
-            process(w, item_to_off(item));
-            continue;
         }
-        sched_yield();
+        for (i = 0; i < k; i++)
+            process(w, item_to_off(items[i]));
     }
     w->cpu_sec = thread_cpu_sec();
     return NULL;
+}
+
+/* Đẩy hết lô; ring đầy thì nhường CPU cho worker rồi đẩy phần còn lại. */
+static void flush_batch(struct ring *rx, struct batch *b)
+{
+    size_t done = 0;
+
+    while (done < b->n)
+    {
+        size_t k = ring_push_bulk(rx, b->items + done, b->n - done);
+
+        if (k == 0)
+            sched_yield();
+        done += k;
+    }
+    b->n = 0;
 }
 
 /*
@@ -163,27 +196,30 @@ static void *worker_main(void *arg)
  *   2. Tạo cho từng worker: ring, session_table, stats_init.
  *   3. pthread_create các worker.
  *   4. Luồng hiện tại làm reader: pcap_map_next -> peek TEID -> pick_worker
- *      -> ring_push offset (spin khi đầy).
- *   5. Set done; pthread_join mọi worker.
+ *      -> thêm offset vào lô của worker đó, đủ lô thì flush_batch.
+ *   5. Flush mọi lô còn dở, set done; pthread_join mọi worker.
  *   6. Gộp stats vào res->total; chuyển quyền sở hữu các table sang res.
  *   7. Dọn mọi thứ còn lại (goto cleanup).
  */
 int pipeline_run(const struct pipeline_config *cfg, struct pipeline_result *res)
 {
     struct worker *ws = NULL;
+    struct batch *batches = NULL;
     struct pcap_map *map = NULL;
     struct pcap_packet pkt;
     struct timespec t0, tr, t1;
     _Atomic bool done;
     unsigned n, i, started = 0;
     enum pcap_status st;
-    size_t off;
+    size_t off, batch;
     int rc = -1;
 
     memset(res, 0, sizeof *res);
     stats_init(&res->total);
     n = cfg->n_workers;
-    if (n == 0 || n > PIPELINE_MAX_WORKERS)
+    batch = cfg->batch == 0 ? 1 : cfg->batch;
+    if (n == 0 || n > PIPELINE_MAX_WORKERS || batch > PIPELINE_MAX_BATCH ||
+        batch > cfg->ring_capacity)
         return -1;
 
     st = pcap_map_open(cfg->path, &map);
@@ -195,7 +231,8 @@ int pipeline_run(const struct pipeline_config *cfg, struct pipeline_result *res)
 
     atomic_init(&done, false);
     ws = calloc(n, sizeof *ws);
-    if (ws == NULL)
+    batches = calloc(n, sizeof *batches);
+    if (ws == NULL || batches == NULL)
         goto cleanup;
     for (i = 0; i < n; i++)
     {
@@ -229,11 +266,14 @@ int pipeline_run(const struct pipeline_config *cfg, struct pipeline_result *res)
             break;
         if (peek_teid(pkt.data, pkt.caplen, &teid))
             w = pick_worker(teid, n);
-        while (!ring_push(ws[w].rx, off_to_item(rec)))
-            sched_yield();
+        batches[w].items[batches[w].n++] = off_to_item(rec);
+        if (batches[w].n == batch)
+            flush_batch(ws[w].rx, &batches[w]);
         res->per_worker_packets[w]++;
     }
     res->read_status = st;
+    for (i = 0; i < n; i++)
+        flush_batch(ws[i].rx, &batches[i]);
 
 stop:
     clock_gettime(CLOCK_MONOTONIC, &tr);
@@ -267,6 +307,7 @@ cleanup:
         }
     }
     free(ws);
+    free(batches);
     pcap_map_close(map);
     return rc;
 }

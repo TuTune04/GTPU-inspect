@@ -23,11 +23,14 @@ extern "C" {
 #endif
 
 #define PIPELINE_MAX_WORKERS 64u
+#define PIPELINE_MAX_BATCH   256u
 
 struct pipeline_config {
     const char *path;
     unsigned    n_workers;      /* 1..PIPELINE_MAX_WORKERS */
     size_t      ring_capacity;  /* lũy thừa 2, ví dụ 1024 */
+    size_t      batch;          /* số gói mỗi lần push, 0/1 = từng gói;
+                                   <= PIPELINE_MAX_BATCH và <= ring_capacity */
 };
 
 struct pipeline_result {

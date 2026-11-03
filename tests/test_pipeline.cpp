@@ -51,12 +51,13 @@ void check_session(const session *s, void *arg) {
 }
 
 void expect_same_as_sequential(const std::string &name, unsigned workers,
-                               size_t ring_capacity) {
+                               size_t ring_capacity, size_t batch = 1) {
   SCOPED_TRACE(name + " workers=" + std::to_string(workers) +
-               " ring=" + std::to_string(ring_capacity));
+               " ring=" + std::to_string(ring_capacity) +
+               " batch=" + std::to_string(batch));
   const std::string path = data_path(name + ".pcap");
   Sequential seq(path);
-  pipeline_config cfg = {path.c_str(), workers, ring_capacity};
+  pipeline_config cfg = {path.c_str(), workers, ring_capacity, batch};
   pipeline_result res;
 
   ASSERT_EQ(pipeline_run(&cfg, &res), 0);
@@ -96,21 +97,38 @@ TEST(Pipeline, TinyRingsApplyBackpressure) {
     expect_same_as_sequential("gtpu_basic", workers, 2);
 }
 
+TEST(Pipeline, BatchesMatchSequential) {
+  // Lô lớn hơn số gói của file (chỉ flush ở cuối), lô vừa, và lô bằng đúng
+  // capacity của ring (ring 4 slot, lô 4: mỗi flush lấp đầy ring).
+  for (const char *name : {"gtpu_basic", "malformed", "gtpu_5g_ext"})
+    for (unsigned workers : {1u, 3u}) {
+      expect_same_as_sequential(name, workers, 1024, 256);
+      expect_same_as_sequential(name, workers, 1024, 7);
+      expect_same_as_sequential(name, workers, 4, 4);
+    }
+}
+
 TEST(Pipeline, RejectsBadConfig) {
   const std::string path = data_path("gtpu_basic.pcap");
   pipeline_result res;
-  pipeline_config cfg = {path.c_str(), 0, 1024};
+  pipeline_config cfg = {path.c_str(), 0, 1024, 1};
   EXPECT_NE(pipeline_run(&cfg, &res), 0);
   cfg.n_workers = PIPELINE_MAX_WORKERS + 1;
   EXPECT_NE(pipeline_run(&cfg, &res), 0);
   cfg.n_workers = 2;
   cfg.ring_capacity = 1000;  // không phải lũy thừa 2
   EXPECT_NE(pipeline_run(&cfg, &res), 0);
+  cfg.ring_capacity = 16;
+  cfg.batch = 32;  // lô lớn hơn ring: không bao giờ đẩy trọn một lô
+  EXPECT_NE(pipeline_run(&cfg, &res), 0);
+  cfg.batch = PIPELINE_MAX_BATCH + 1;
+  cfg.ring_capacity = 1024;
+  EXPECT_NE(pipeline_run(&cfg, &res), 0);
 }
 
 TEST(Pipeline, ReportsOpenError) {
   const std::string path = data_path("does_not_exist.pcap");
-  pipeline_config cfg = {path.c_str(), 2, 1024};
+  pipeline_config cfg = {path.c_str(), 2, 1024, 1};
   pipeline_result res;
   EXPECT_NE(pipeline_run(&cfg, &res), 0);
   EXPECT_EQ(res.read_status, PCAP_ERR_IO);

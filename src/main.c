@@ -2,10 +2,11 @@
  * main.c — chương trình gtpu-inspect.                        [TUẦN 1 -> 3]
  *
  * Cách dùng mục tiêu:
- *   gtpu-inspect [-v] [-n TOP] [-w WORKERS] file.pcap
+ *   gtpu-inspect [-v] [-n TOP] [-w WORKERS [-b BATCH]] file.pcap
  *     -v          in mỗi gói một dòng (tuần 1)
  *     -n TOP      số phiên trong bảng top N (tuần 2, mặc định 10)
  *     -w WORKERS  số luồng worker (tuần 3; 0 = chạy tuần tự, không thread)
+ *     -b BATCH    với -w: số gói mỗi lần đẩy qua ring (v2, mặc định 32)
  *
  * CTest tự chạy chương trình trên mọi file .pcap trong tests/data/ (test cli.*):
  * chỉ fail khi crash hoặc sanitizer báo lỗi.
@@ -62,7 +63,7 @@
  */
 static void usage(const char *prog)
 {
-    fprintf(stderr, "usage: %s [-v] [-n TOP] [-w WORKERS] file.pcap\n",
+    fprintf(stderr, "usage: %s [-v] [-n TOP] [-w WORKERS [-b BATCH]] file.pcap\n",
             prog);
 }
 
@@ -158,8 +159,8 @@ static int run_pipeline(const struct pipeline_config *cfg, size_t top_n)
                 " phiên khi gộp\n", res.dropped_sessions, ctx.failed);
 
     /* Số đo cho benchmark, ra stderr để stdout giống hệt chế độ tuần tự. */
-    fprintf(stderr, "pipeline: %u worker, %" PRIu64 " gói trong %.3f s"
-            " (%.2f Mpps)\n", res.n_workers, res.total.packets, res.elapsed_sec,
+    fprintf(stderr, "pipeline: %u worker, lô %zu, %" PRIu64 " gói trong %.3f s"
+            " (%.2f Mpps)\n", res.n_workers, cfg->batch, res.total.packets, res.elapsed_sec,
             res.elapsed_sec > 0 ? (double)res.total.packets / res.elapsed_sec / 1e6
                                 : 0.0);
     fprintf(stderr, "  reader: %.3f s\n", res.reader_sec);
@@ -183,6 +184,7 @@ int main(int argc, char **argv)
         .path = NULL,
         .n_workers = 0,       /* 0 = chạy tuần tự */
         .ring_capacity = 1024,
+        .batch = 32,      /* đo: 32 và 128 như nhau, 1 chậm nhất */
     };
     bool verbose = false;
     struct pcap_reader *reader;
@@ -192,7 +194,7 @@ int main(int argc, char **argv)
     unsigned long v;
     int opt;
 
-    while ((opt = getopt(argc, argv, "vn:w:")) != -1)
+    while ((opt = getopt(argc, argv, "vn:w:b:")) != -1)
     {
         if (opt == 'v')
         {
@@ -206,6 +208,11 @@ int main(int argc, char **argv)
                  v <= PIPELINE_MAX_WORKERS)
         {
             cfg.n_workers = (unsigned)v;
+        }
+        else if (opt == 'b' && parse_ulong(optarg, &v) && v >= 1 &&
+                 v <= PIPELINE_MAX_BATCH)
+        {
+            cfg.batch = (size_t)v;
         }
         else
         {
