@@ -64,43 +64,89 @@
 #include <stddef.h>
 #include <stdlib.h>    /* aligned_alloc, calloc, free */
 
+/* Cache line 64 byte trên x86-64 và phần lớn ARM64. head, tail và phần
+ * chỉ-đọc (mask, slots) mỗi thứ một line: producer ghi head, consumer ghi
+ * tail, hai core không tranh nhau cùng một line. */
+#define RING_CACHE_LINE 64
+
+struct ring {
+    _Alignas(RING_CACHE_LINE) _Atomic size_t head;  /* chỉ producer ghi */
+    _Alignas(RING_CACHE_LINE) _Atomic size_t tail;  /* chỉ consumer ghi */
+    _Alignas(RING_CACHE_LINE) size_t mask;          /* capacity - 1 */
+    void **slots;
+};
+
 /* ring_create: kiểm tra capacity >= 2 và (capacity & (capacity - 1)) == 0. */
 struct ring *ring_create(size_t capacity)
 {
-    /* TODO: xóa stub và viết code của bạn */
-    (void)capacity;
-    return NULL;
+    struct ring *r;
+
+    if (capacity < 2u || (capacity & (capacity - 1u)) != 0)
+        return NULL;
+
+    /* malloc chỉ bảo đảm alignof(max_align_t); struct có _Alignas(64) phải
+     * cấp bằng aligned_alloc. sizeof đã là bội của 64 vì alignment của
+     * struct là 64, đúng điều kiện size của aligned_alloc. */
+    r = aligned_alloc(alignof(struct ring), sizeof *r);
+    if (r == NULL)
+        return NULL;
+    r->slots = calloc(capacity, sizeof *r->slots);
+    if (r->slots == NULL)
+    {
+        free(r);
+        return NULL;
+    }
+    atomic_init(&r->head, 0);
+    atomic_init(&r->tail, 0);
+    r->mask = capacity - 1u;
+    return r;
 }
 
 /* ring_destroy: NULL-safe; free slots và struct. Không free các item. */
 void ring_destroy(struct ring *r)
 {
-    /* TODO */
-    (void)r;
+    if (r == NULL)
+        return;
+    free(r->slots);
+    free(r);
 }
 
 /* ring_push: xem pseudo-code ở đầu file. */
 bool ring_push(struct ring *r, void *item)
 {
-    /* TODO */
-    (void)r;
-    (void)item;
-    return false;
+    size_t h = atomic_load_explicit(&r->head, memory_order_relaxed);
+    /* acquire: cặp với release trong ring_pop. Consumer đọc xong slot rồi
+     * mới công bố tail mới, nên ghi đè slot đó ở đây là an toàn. */
+    size_t t = atomic_load_explicit(&r->tail, memory_order_acquire);
+
+    if (h - t > r->mask)
+        return false;
+    r->slots[h & r->mask] = item;
+    /* release: ghi slot phía trên phải được thấy trước head mới. */
+    atomic_store_explicit(&r->head, h + 1u, memory_order_release);
+    return true;
 }
 
 /* ring_pop: xem pseudo-code ở đầu file. */
 bool ring_pop(struct ring *r, void **item)
 {
-    /* TODO */
-    (void)r;
-    (void)item;
-    return false;
+    size_t t = atomic_load_explicit(&r->tail, memory_order_relaxed);
+    size_t h = atomic_load_explicit(&r->head, memory_order_acquire);
+
+    if (h == t)
+        return false;
+    *item = r->slots[t & r->mask];
+    atomic_store_explicit(&r->tail, t + 1u, memory_order_release);
+    return true;
 }
 
 /* ring_count: head - tail, cả hai load relaxed. */
 size_t ring_count(const struct ring *r)
 {
-    /* TODO */
-    (void)r;
-    return 0;
+    /* Load tail trước: tail chỉ tăng nên tail cũ <= head đọc sau, hiệu
+     * không bao giờ "âm". Đọc head trước có thể ra số khổng lồ. */
+    size_t t = atomic_load_explicit(&r->tail, memory_order_relaxed);
+    size_t h = atomic_load_explicit(&r->head, memory_order_relaxed);
+
+    return h - t;
 }
