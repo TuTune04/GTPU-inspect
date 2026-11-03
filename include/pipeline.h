@@ -1,9 +1,8 @@
 /*
- * pipeline.h — 1 luồng đọc + N luồng worker.                 [TUẦN 3]
+ * pipeline.h — 1 luồng đọc + N luồng worker.             [TUẦN 3, v2]
  *
- *  .pcap -> [reader] -- hash(TEID) % N --> ring[i] --> [worker i]
- *               ^                                         |
- *               +------------- free_ring[i] <-------------+  (trả buffer)
+ *  .pcap (mmap) -> [reader] -- hash(TEID) % N --> ring[i] --> [worker i]
+ *                                 offset record           đọc thẳng từ map
  *
  * Mỗi worker có struct stats và session_table RIÊNG; sau khi mọi worker
  * kết thúc, luồng chính gộp stats bằng stats_merge.
@@ -29,8 +28,6 @@ struct pipeline_config {
     const char *path;
     unsigned    n_workers;      /* 1..PIPELINE_MAX_WORKERS */
     size_t      ring_capacity;  /* lũy thừa 2, ví dụ 1024 */
-    size_t      pool_size;      /* số buffer mỗi worker, ví dụ 4096 */
-    bool        use_mempool;    /* false: malloc/free mỗi gói (để so sánh) */
 };
 
 struct pipeline_result {
@@ -46,7 +43,7 @@ struct pipeline_result {
 };
 
 /* 0 nếu thành công (kể cả khi file hỏng giữa chừng: xem read_status, stats
- * vẫn chứa các gói đã đọc). pcap_open lỗi -> -1 và read_status là lỗi đó.
+ * vẫn chứa các gói đã đọc). pcap_map_open lỗi -> -1 và read_status là lỗi đó.
  * Khi thành công, gọi pipeline_result_free sau khi dùng. */
 int  pipeline_run(const struct pipeline_config *cfg, struct pipeline_result *res);
 void pipeline_result_free(struct pipeline_result *res);
