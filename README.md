@@ -16,10 +16,12 @@ captures, decodes the Ethernet → IPv4 → UDP → GTP-U → inner IP stack acc
   (including the 5G PDU Session Container / QFI), G-PDU, Echo, Error Indication, End Marker
 - Per-TEID session table (open-addressing hash table) with packet/byte counters
 - Strict bounds checking: malformed packets are counted by error type, never trusted
-- Multi-worker pipeline (`-w N`) with TEID-based dispatch and lock-free SPSC ring buffers;
-  output is identical to the sequential mode
-- Fixed-size memory pool and throughput benchmarks: 6.6 Mpps sequential on an i5-1135G7;
-  the pipeline is slower on this light workload (see [bench/README.md](bench/README.md))
+- Multi-worker pipeline (`-w N`): the pcap file is mmap'd, a reader dispatches record
+  offsets by TEID over lock-free SPSC rings in batches (`-b`), idle workers spin briefly
+  then sleep; a shared-nothing mode (`-S`) splits the file between workers instead.
+  Output is identical to the sequential mode
+- Throughput on an i5-1135G7: 13.4 Mpps with 1 worker vs 6.1 Mpps sequential
+  (see [bench/README.md](bench/README.md), [docs/review-v2.md](docs/review-v2.md))
 
 ### Quality
 - Builds with `-Wall -Wextra -Werror -std=c11` on GCC and Clang

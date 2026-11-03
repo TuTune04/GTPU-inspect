@@ -33,6 +33,13 @@ bool ring_push(struct ring *r, void *item);
 /* Consumer. Rỗng -> false. */
 bool ring_pop(struct ring *r, void **item);
 
+/* Theo lô (v2): một lần cập nhật head/tail cho cả lô, nên chi phí đồng bộ
+ * giữa hai core chia đều cho n phần tử. Push được bao nhiêu thì trả về bấy
+ * nhiêu (0..n, theo thứ tự, phần còn lại người gọi thử lại). Pop tối đa max
+ * phần tử, trả số đã lấy. */
+size_t ring_push_bulk(struct ring *r, void *const *items, size_t n);
+size_t ring_pop_bulk(struct ring *r, void **items, size_t max);
+
 /* Số phần tử ước lượng — chỉ dùng để quan sát/debug, không dùng để đồng bộ. */
 size_t ring_count(const struct ring *r);
 

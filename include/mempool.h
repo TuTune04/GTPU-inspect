@@ -5,9 +5,11 @@
  * malloc. alloc/free chỉ là lấy/trả phần tử ở đầu free list: O(1), không
  * gọi malloc, không phân mảnh, thời gian ổn định.
  *
- * Pool KHÔNG thread-safe: chỉ một luồng được gọi alloc/free. Trong pipeline
- * tuần 3, reader alloc còn worker xong việc phải TRẢ buffer — xem
- * pipeline.c về cách trả buffer qua một ring ngược (worker -> reader).
+ * Pool KHÔNG thread-safe: chỉ một luồng được gọi alloc/free. Pipeline v1
+ * (nhánh week3_v1) dùng pool cho buffer gói: reader alloc, worker xong việc
+ * trả buffer qua một ring ngược (worker -> reader). Từ v2 pipeline mmap file
+ * nên không chép gói và không dùng pool nữa; pool vẫn là lựa chọn đúng khi
+ * gói đến từ socket/NIC và buffer phải được tái sử dụng.
  */
 #ifndef GTPU_MEMPOOL_H
 #define GTPU_MEMPOOL_H

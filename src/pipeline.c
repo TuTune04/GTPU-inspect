@@ -1,5 +1,5 @@
 /*
- * pipeline.c — reader thread + N worker, dispatch theo TEID. [TUẦN 3]
+ * pipeline.c — reader thread + N worker, dispatch theo TEID. [TUẦN 3, v2]
  *
  * VÌ SAO CHIA THEO TEID MÀ KHÔNG ROUND-ROBIN
  *   - Mọi gói của một phiên luôn đến cùng một worker -> giữ thứ tự gói
@@ -7,111 +7,139 @@
  *   - Cái giá: phân bố tải phụ thuộc lưu lượng từng phiên. File bench có vài
  *     phiên "nặng" — hãy đo per_worker_packets để thấy độ lệch.
  *
- * VẤN ĐỀ: READER PHẢI HASH TEID TRƯỚC KHI GỬI
- *   Reader cần TEID mà chưa parse cả gói. Hai lựa chọn:
- *     a) Reader gọi parse_packet đầy đủ, gửi kèm kết quả -> worker chỉ cập
- *        nhật bảng. Đơn giản, nhưng phần parse nằm trên một luồng.
- *     b) Reader chỉ đọc nhanh tới TEID (offset cố định 14+IHL*4+8+4, vẫn
- *        phải kiểm tra biên!), worker parse đầy đủ. Song song tốt hơn.
- *   Làm (a) trước cho đúng, đo, rồi thử (b) và so sánh — đây là một câu
- *   chuyện benchmark rất hay để kể khi phỏng vấn.
- *   Gói lỗi / không phải GTP-U: gửi cho worker 0, hoặc reader tự đếm.
+ * READER CHỈ ĐỌC NHANH TEID
+ *   Reader đọc tới TEID ở offset cố định 14 + IHL*4 + 8 + 4 (có kiểm tra
+ *   biên), worker parse đầy đủ, để phần parse chạy song song. Gói không đọc
+ *   được TEID: gửi cho worker 0.
  *
- * VẤN ĐỀ: TRẢ BUFFER VỀ POOL
- *   mempool không thread-safe; reader alloc nhưng worker dùng xong. Giải
- *   pháp đối xứng: mỗi worker i có thêm free_ring[i] (SPSC, worker -> reader).
- *   Worker push buffer đã xong vào free_ring[i]; reader pop ra và
- *   mempool_free. Mỗi ring vẫn đúng một producer, một consumer.
- *   (Cách khác: mỗi worker một pool riêng — tự so sánh ưu nhược.)
+ * v2: KHÔNG CHÉP GÓI
+ *   v1 chép mỗi gói vào một buffer lấy từ mempool rồi trả buffer về qua
+ *   free_ring. perf cho thấy riêng phần chép (fread + memcpy) chiếm ~1/3 mẫu
+ *   của reader, và worker đọc dữ liệu vừa được core khác GHI nên mỗi gói là
+ *   một lần chuyển cache line. v2 mmap cả file (pcap_map_*): ring chỉ chở
+ *   offset của record, worker đọc thẳng từ vùng map. Không còn mempool,
+ *   free_ring, hay deadlock "reader chờ join, worker chờ free_ring".
+ *   Mempool vẫn đúng chỗ khi gói đến từ socket/NIC, nơi buffer phải được tái
+ *   sử dụng — chỉ là đọc file thì không cần.
  *
- * VẤN ĐỀ: KẾT THÚC
- *   Reader đọc hết file -> báo cho worker dừng. Cách đơn giản: một biến
- *   _Atomic bool done; worker chỉ thoát khi done == true VÀ ring rỗng.
- *   Thứ tự: reader set done SAU khi push gói cuối (release), worker load
- *   done (acquire) rồi kiểm tra ring lần nữa trước khi thoát.
+ * KẾT THÚC
+ *   Reader set done (release) SAU khi push gói cuối; worker thấy done
+ *   (acquire) thì pop lại một lần nữa rồi mới thoát.
  *
- * VẤN ĐỀ: RING ĐẦY / RỖNG
- *   Ring đầy: reader spin (thử lại), có thể chèn sched_yield() (<sched.h>)
- *   sau vài lần thất bại. Ring rỗng: worker tương tự. Busy-polling là cách
- *   các hệ thống data plane thật (DPDK) làm; đổi lại 100% CPU.
+ * v2: ĐẨY THEO LÔ
+ *   Một push/pop mỗi gói nghĩa là mỗi gói một lần cache line head/tail đổi
+ *   chủ giữa hai core. Reader gom cfg->batch offset cho từng worker rồi
+ *   ring_push_bulk một lần; worker ring_pop_bulk tối đa WORKER_POP_MAX.
+ *   Lô của reader nằm trong mảng batches riêng, KHÔNG nằm trong struct
+ *   worker: reader ghi lô liên tục, worker ghi stats liên tục, chung cache
+ *   line là false sharing.
  *
- * Gợi ý cấu trúc:
+ * v2: SHARED-NOTHING (cfg->shared_nothing)
+ *   Pipeline vẫn buộc mọi gói đi qua MỘT reader, nên reader là trần thông
+ *   lượng. Chế độ này bỏ reader: luồng chính chỉ duyệt record header để chia
+ *   file thành n đoạn gần bằng nhau về byte (pcap không có chỉ mục, không
+ *   nhảy được vào giữa file mà chắc chắn tìm ra đầu record), rồi mỗi worker
+ *   tự parse đoạn của mình. Không ring, không đồng bộ trong lúc chạy.
+ *   Cái giá: một phiên có thể nằm ở nhiều worker, nên main phải gộp bằng
+ *   session_merge theo thứ tự đoạn, và mất thứ tự xử lý trong một phiên.
  *
- *   struct pkt_buf {                  phần tử đi qua ring
- *       uint32_t caplen, orig_len;
- *       uint64_t ts_ns;
- *       uint8_t  data[PCAP_MAX_CAPLEN];   hoặc nhỏ hơn + kiểm tra caplen
- *   };
+ * RING ĐẦY / RỖNG
+ *   Ring đầy: reader sched_yield() rồi thử lại (reader là nút thắt nên hiếm).
+ *   v2: ring rỗng thì worker spin vài vòng với lệnh pause rồi ngủ trên condvar
+ *   (wait_for_work), reader đánh thức sau khi flush lô. v1 sched_yield liên
+ *   tục: với 4 worker tốn 2.7 s sys để chờ một reader chậm.
  *
- *   struct worker {
- *       pthread_t             tid;
- *       unsigned              id;
- *       struct ring          *rx;         reader -> worker
- *       struct ring          *free_ring;  worker -> reader
- *       struct session_table *table;
- *       struct stats          stats;
- *       const _Atomic bool   *done;
- *   };
- *
- *   static void *worker_main(void *arg);
- *       Chữ ký bắt buộc của pthread_create. arg là struct worker*.
- *       Vòng lặp: pop -> parse -> stats_record -> push vào free_ring.
- *
- *   static unsigned pick_worker(uint32_t teid, unsigned n);
- *       Đừng dùng teid % n trực tiếp — TEID cấp tuần tự sẽ phân bố theo kiểu
- *       round-robin "giả". Trộn bit trước (dùng lại hàm hash của
- *       session_table, hoặc nhân với hằng số Fibonacci 0x9E3779B1u).
- *
- * Đo thời gian: clock_gettime(CLOCK_MONOTONIC, &ts) trong <time.h>.
- * Đo riêng thời gian đọc file và thời gian xử lý.
+ *   Không mất tín hiệu đánh thức (mẫu Dekker): worker ghi sleeping = true
+ *   RỒI mới xem ring; reader push RỒI mới xem sleeping. Có fence seq_cst ở
+ *   giữa ở cả hai phía nên ít nhất một bên thấy việc của bên kia: hoặc worker
+ *   thấy ring có hàng và không ngủ, hoặc reader thấy sleeping và signal. Worker
+ *   giữ mutex từ lúc xem ring tới khi cond_wait nhả nó, reader signal dưới
+ *   cùng mutex, nên signal không thể lọt vào khe giữa "xem" và "ngủ".
  */
 #include "pipeline.h"
 
 #include <pthread.h>   /* pthread_create, pthread_join */
+#include <sched.h>     /* sched_yield */
 #include <stdatomic.h> /* _Atomic bool done */
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>      /* clock_gettime, CLOCK_MONOTONIC */
-
-#include <sched.h>     /* sched_yield */
+#if defined(__x86_64__) || defined(__i386__)
+#include <immintrin.h> /* _mm_pause */
+#endif
 
 #include "bytes.h"     /* rd_be32 */
-#include "mempool.h"
 #include "parser.h"
 #include "pcap.h"
 #include "ring.h"
 
-/* Ô pool chứa vừa gói <= 2048 byte (MTU 1500 + outer header còn dư). Gói
- * lớn hơn, hoặc khi tắt mempool, cấp riêng bằng malloc đúng caplen. */
-#define POOL_DATA_LEN 2048u
-#define TABLE_INITIAL_CAPACITY 1024u/* TEID nằm ở byte 4-7 của header GTP-U. */
+#define TABLE_INITIAL_CAPACITY 1024u
+#define WORKER_POP_MAX 64u
+/* Ring rỗng: spin bấy nhiêu vòng (pause) rồi ngủ. Phải ngắn hơn khoảng cách
+ * giữa hai lô (~9 us với 4 worker, lô 32 trên big.pcap) thì mới tiết kiệm
+ * được CPU: đo với 256 vòng spin + 64 lần yield, worker gần như không bao giờ
+ * ngủ (cpu 4 worker 0.81 s); 16 vòng: 0.51 s; ngủ ngay: 0.32 s — thông lượng
+ * như nhau trong vùng nhiễu. Tầng sched_yield ở giữa không giúp gì nên bỏ. */
+#define IDLE_SPINS 16u
+/* TEID nằm ở byte 4-7 của header GTP-U. */
 #define GTPU_OFF_TEID 4u
 
-struct pkt_buf {
-    uint32_t caplen, orig_len;
-    uint64_t ts_ns;
-    bool     pooled;       /* true: trả về mempool, false: free() */
-    uint8_t  data[];
-};
-
 struct worker {
-    pthread_t             tid;
-    struct ring          *rx;         /* reader -> worker */
-    struct ring          *free_ring;  /* worker -> reader */
-    struct session_table *table;
-    struct stats          stats;
-    uint64_t              dropped_sessions;
-    const _Atomic bool   *done;
-    _Atomic bool          finished;   /* worker set ngay trước khi thoát */
+    pthread_t              tid;
+    struct ring           *rx;        /* reader -> worker: offset record */
+    const struct pcap_map *map;       /* chỉ đọc, chung mọi luồng */
+    struct session_table  *table;
+    struct stats           stats;
+    uint64_t               dropped_sessions;
+    double                 cpu_sec;   /* CPU của riêng luồng này */
+    const _Atomic bool    *done;
+    size_t                 begin, end; /* shared-nothing: đoạn [begin, end) */
+    pthread_mutex_t        lock;       /* chỉ dùng khi worker ngủ / đánh thức */
+    pthread_cond_t         wake;
+    _Atomic bool           sleeping;
+    uint64_t               sleeps;
 };
 
-/* Chọn reader (b): reader chỉ đọc nhanh TEID, worker parse đầy đủ, để phần
- * parse chạy song song. Cùng offset với parser (14 + IHL*4 + 8 + 4) và
- * parser không xử lý VLAN, nên gói nào parse OK cũng ra đúng TEID của nó ->
- * mọi gói của một phiên về cùng một worker. Gói lỗi có thể ra TEID rác, chỉ
- * ảnh hưởng chia tải chứ không ảnh hưởng kết quả. */
+/* Lô offset reader đang gom cho một worker. Chỉ reader chạm vào. */
+struct batch {
+    void  *items[PIPELINE_MAX_BATCH];
+    size_t n;
+};
+
+static double ts_sec(const struct timespec *t)
+{
+    return (double)t->tv_sec + (double)t->tv_nsec / 1e9;
+}
+
+/* CPU đã dùng của luồng gọi (POSIX). So với wall: worker rảnh mà CPU cao
+ * nghĩa là nó đang spin chờ chứ không làm việc. */
+static double thread_cpu_sec(void)
+{
+    struct timespec t;
+
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t);
+    return ts_sec(&t);
+}
+
+/* Ring chở void*; v2 chở offset của record trong vùng map (luôn >= 24 nên
+ * không bao giờ trùng NULL). Đổi qua uintptr_t: số nguyên <-> con trỏ, không
+ * phải ép con trỏ buffer sang struct. */
+static void *off_to_item(size_t off)
+{
+    return (void *)(uintptr_t)off;
+}
+
+static size_t item_to_off(void *item)
+{
+    return (size_t)(uintptr_t)item;
+}
+
+/* Cùng offset với parser (14 + IHL*4 + 8 + 4) và parser không xử lý VLAN,
+ * nên gói nào parse OK cũng ra đúng TEID của nó -> mọi gói của một phiên về
+ * cùng một worker. Gói lỗi có thể ra TEID rác, chỉ ảnh hưởng chia tải chứ
+ * không ảnh hưởng kết quả. */
 static bool peek_teid(const uint8_t *p, size_t len, uint32_t *teid)
 {
     size_t off;
@@ -135,124 +163,199 @@ static unsigned pick_worker(uint32_t teid, unsigned n)
     return (unsigned)(((uint64_t)h * n) >> 32);
 }
 
-static void process(struct worker *w, struct pkt_buf *b)
+/* Gợi ý cho CPU "đang spin": nhường tài nguyên cho hyperthread kia và
+ * không đầu cơ load liên tục vào cache line của ring. */
+static void cpu_relax(void)
 {
-    struct pkt_info info;
-    enum parse_result r = parse_packet(b->data, b->caplen, &info);
+#if defined(__x86_64__) || defined(__i386__)
+    _mm_pause();
+#endif
+}
 
-    if (stats_record(&w->stats, w->table, r, &info, b->orig_len, b->ts_ns) != 0)
+/* Ring rỗng: spin một lúc rồi ngủ. *idle đếm số lần liên tiếp không lấy
+ * được gì, worker reset về 0 khi có việc. */
+static void wait_for_work(struct worker *w, unsigned *idle)
+{
+    if (*idle < IDLE_SPINS)
+    {
+        (*idle)++;
+        cpu_relax();
+        return;
+    }
+    pthread_mutex_lock(&w->lock);
+    atomic_store_explicit(&w->sleeping, true, memory_order_relaxed);
+    atomic_thread_fence(memory_order_seq_cst);   /* cặp với wake_worker */
+    if (ring_count(w->rx) == 0 &&
+        !atomic_load_explicit(w->done, memory_order_acquire))
+        w->sleeps++;
+    while (ring_count(w->rx) == 0 &&
+           !atomic_load_explicit(w->done, memory_order_acquire))
+        pthread_cond_wait(&w->wake, &w->lock);
+    atomic_store_explicit(&w->sleeping, false, memory_order_relaxed);
+    pthread_mutex_unlock(&w->lock);
+    *idle = 0;
+}
+
+/* Reader gọi sau khi push. Đa số lần worker không ngủ: chỉ tốn một fence và
+ * một load, không đụng mutex. */
+static void wake_worker(struct worker *w)
+{
+    atomic_thread_fence(memory_order_seq_cst);   /* cặp với wait_for_work */
+    if (atomic_load_explicit(&w->sleeping, memory_order_relaxed))
+    {
+        pthread_mutex_lock(&w->lock);
+        pthread_cond_signal(&w->wake);
+        pthread_mutex_unlock(&w->lock);
+    }
+}
+
+/* Xử lý record tại *off và đưa *off tới record kế. */
+static bool process(struct worker *w, size_t *off)
+{
+    struct pcap_packet pkt;
+    struct pkt_info info;
+    enum parse_result r;
+
+    /* Reader (hoặc split_file) đã đọc thành công record này và vùng map chỉ
+     * đọc, nên đọc lại luôn OK; vẫn kiểm tra thay vì tin mù. */
+    if (pcap_map_next(w->map, off, &pkt) != PCAP_OK)
+        return false;
+    r = parse_packet(pkt.data, pkt.caplen, &info);
+    if (stats_record(&w->stats, w->table, r, &info, pkt.orig_len, pkt.ts_ns) != 0)
         w->dropped_sessions++;
-    while (!ring_push(w->free_ring, b))
-        sched_yield();
+    return true;
 }
 
 static void *worker_main(void *arg)
 {
     struct worker *w = arg;
-    void *item;
+    void *items[WORKER_POP_MAX];
+    unsigned idle = 0;
+    size_t k, i;
 
     for (;;)
     {
-        if (ring_pop(w->rx, &item))
+        k = ring_pop_bulk(w->rx, items, WORKER_POP_MAX);
+        if (k == 0)
         {
-            process(w, item);
-            continue;
-        }
-        /* Reader set done SAU khi push gói cuối (release). Thấy done thì
-         * pop lại một lần nữa mới chắc ring đã thật sự rỗng. */
-        if (atomic_load_explicit(w->done, memory_order_acquire))
-        {
-            if (!ring_pop(w->rx, &item))
+            /* Reader set done SAU khi push gói cuối (release). Thấy done thì
+             * pop lại một lần nữa mới chắc ring đã thật sự rỗng. */
+            if (!atomic_load_explicit(w->done, memory_order_acquire))
+            {
+                wait_for_work(w, &idle);
+                continue;
+            }
+            k = ring_pop_bulk(w->rx, items, WORKER_POP_MAX);
+            if (k == 0)
                 break;
-            process(w, item);
-            continue;
         }
-        sched_yield();
+        idle = 0;
+        for (i = 0; i < k; i++)
+        {
+            size_t off = item_to_off(items[i]);
+
+            process(w, &off);
+        }
     }
-    atomic_store_explicit(&w->finished, true, memory_order_release);
+    w->cpu_sec = thread_cpu_sec();
     return NULL;
 }
 
-static void release_buf(struct mempool *pool, struct pkt_buf *b)
+/* Shared-nothing: tự đọc đoạn [begin, end) của mình, không chờ ai. */
+static void *chunk_main(void *arg)
 {
-    if (b->pooled)
-        mempool_free(pool, b);
-    else
-        free(b);
+    struct worker *w = arg;
+    size_t off = w->begin;
+
+    while (off < w->end && process(w, &off))
+        ;
+    w->cpu_sec = thread_cpu_sec();
+    return NULL;
 }
 
-/* Chỉ reader gọi: reader là consumer duy nhất của mọi free_ring và là luồng
- * duy nhất chạm vào pool. */
-static void drain_free(struct worker *ws, unsigned n, struct mempool *pool)
+/* Chia vùng record thành n đoạn gần bằng nhau về byte, cắt đúng đầu record:
+ * bounds[i] .. bounds[i + 1] là đoạn i. Duyệt hết mọi record header nên ra
+ * luôn trạng thái cuối và điểm dừng (EOF hay lỗi) giống hệt reader. */
+static enum pcap_status split_file(const struct pcap_map *m, unsigned n,
+                                   size_t *bounds)
 {
-    unsigned i;
-    void *item;
+    size_t first = pcap_map_first(m);
+    size_t step = (pcap_map_size(m) - first) / n;
+    size_t off = first;
+    struct pcap_packet pkt;
+    enum pcap_status st;
+    unsigned k = 1;
 
-    for (i = 0; i < n; i++)
+    bounds[0] = first;
+    for (;;)
     {
-        while (ring_pop(ws[i].free_ring, &item))
-            release_buf(pool, item);
-    }
-}
+        size_t rec = off;
 
-static struct pkt_buf *get_buf(struct worker *ws, unsigned n,
-                               struct mempool *pool, uint32_t caplen)
-{
-    struct pkt_buf *b;
-
-    if (pool != NULL && caplen <= POOL_DATA_LEN)
-    {
-        /* Hết pool = backpressure: chờ worker trả buffer, không malloc thêm. */
-        while ((b = mempool_alloc(pool)) == NULL)
+        while (k < n && rec - first >= step * k)
+            bounds[k++] = rec;
+        st = pcap_map_next(m, &off, &pkt);
+        if (st != PCAP_OK)
         {
-            drain_free(ws, n, pool);
-            if (mempool_available(pool) == 0)
-                sched_yield();
+            while (k <= n)
+                bounds[k++] = rec;
+            return st;
         }
-        b->pooled = true;
-        return b;
     }
-    b = malloc(sizeof *b + caplen);
-    if (b != NULL)
-        b->pooled = false;
-    return b;
+}
+
+/* Đẩy hết lô; ring đầy thì nhường CPU cho worker rồi đẩy phần còn lại. */
+static void flush_batch(struct worker *w, struct batch *b)
+{
+    size_t done = 0;
+
+    while (done < b->n)
+    {
+        size_t k = ring_push_bulk(w->rx, b->items + done, b->n - done);
+
+        if (k == 0)
+            sched_yield();
+        done += k;
+    }
+    b->n = 0;
+    wake_worker(w);
 }
 
 /*
  * pipeline_run
- *   1. Kiểm tra cfg (n_workers trong khoảng, ring_capacity lũy thừa 2).
- *   2. Tạo cho từng worker: ring, free_ring, session_table, stats_init.
- *   3. Tạo mempool (nếu use_mempool).
- *   4. pthread_create các worker.
- *   5. Luồng hiện tại làm reader: pcap_next -> lấy buffer (pool/malloc) ->
- *      memcpy gói vào -> pick_worker -> ring_push (spin khi đầy). Mỗi vòng
- *      cũng rút free_ring để trả buffer về pool.
- *   6. Set done; pthread_join mọi worker; rút nốt free_ring.
- *   7. Gộp stats vào res->total; chuyển quyền sở hữu các table sang res.
- *   8. Dọn mọi thứ còn lại. Lỗi giữa chừng: dừng các worker đã tạo trước
- *      khi return (dùng goto cleanup).
+ *   1. Kiểm tra cfg, pcap_map_open.
+ *   2. Tạo cho từng worker: ring, session_table, stats_init.
+ *   3. pthread_create các worker.
+ *   4. Luồng hiện tại làm reader: pcap_map_next -> peek TEID -> pick_worker
+ *      -> thêm offset vào lô của worker đó, đủ lô thì flush_batch.
+ *      (shared-nothing: split_file TRƯỚC khi tạo worker, không có reader.)
+ *   5. Flush mọi lô còn dở, set done; pthread_join mọi worker.
+ *   6. Gộp stats vào res->total; chuyển quyền sở hữu các table sang res.
+ *   7. Dọn mọi thứ còn lại (goto cleanup).
  */
 int pipeline_run(const struct pipeline_config *cfg, struct pipeline_result *res)
 {
     struct worker *ws = NULL;
-    struct mempool *pool = NULL;
-    struct pcap_reader *reader = NULL;
+    struct batch *batches = NULL;
+    struct pcap_map *map = NULL;
     struct pcap_packet pkt;
-    struct timespec t0, t1;
+    struct timespec t0, tr, t1;
     _Atomic bool done;
-    unsigned n, i, started = 0;
+    unsigned n, i, started = 0, n_sync = 0;
     enum pcap_status st;
+    size_t off, batch;
+    size_t bounds[PIPELINE_MAX_WORKERS + 1];
+    bool sn = cfg->shared_nothing;
     int rc = -1;
 
     memset(res, 0, sizeof *res);
     stats_init(&res->total);
     n = cfg->n_workers;
-    if (n == 0 || n > PIPELINE_MAX_WORKERS)
-        return -1;
-    if (cfg->use_mempool && (cfg->pool_size == 0 || cfg->pool_size > SIZE_MAX / n))
+    batch = cfg->batch == 0 ? 1 : cfg->batch;
+    if (n == 0 || n > PIPELINE_MAX_WORKERS || batch > PIPELINE_MAX_BATCH ||
+        batch > cfg->ring_capacity)
         return -1;
 
-    st = pcap_open(cfg->path, &reader);
+    st = pcap_map_open(cfg->path, &map);
     if (st != PCAP_OK)
     {
         res->read_status = st;
@@ -261,84 +364,87 @@ int pipeline_run(const struct pipeline_config *cfg, struct pipeline_result *res)
 
     atomic_init(&done, false);
     ws = calloc(n, sizeof *ws);
-    if (ws == NULL)
+    batches = calloc(n, sizeof *batches);
+    if (ws == NULL || batches == NULL)
         goto cleanup;
     for (i = 0; i < n; i++)
     {
-        /* ring_create tự từ chối capacity không phải lũy thừa 2. */
-        ws[i].rx = ring_create(cfg->ring_capacity);
-        ws[i].free_ring = ring_create(cfg->ring_capacity);
-        ws[i].table = session_table_create(TABLE_INITIAL_CAPACITY);
-        if (ws[i].rx == NULL || ws[i].free_ring == NULL || ws[i].table == NULL)
+        if (pthread_mutex_init(&ws[i].lock, NULL) != 0)
             goto cleanup;
+        if (pthread_cond_init(&ws[i].wake, NULL) != 0)
+        {
+            pthread_mutex_destroy(&ws[i].lock);
+            goto cleanup;
+        }
+        n_sync++;
+        atomic_init(&ws[i].sleeping, false);
+        /* ring_create tự từ chối capacity không phải lũy thừa 2.
+         * Shared-nothing không cần ring. */
+        ws[i].rx = sn ? NULL : ring_create(cfg->ring_capacity);
+        ws[i].table = session_table_create(TABLE_INITIAL_CAPACITY);
+        if ((!sn && ws[i].rx == NULL) || ws[i].table == NULL)
+            goto cleanup;
+        ws[i].map = map;
         stats_init(&ws[i].stats);
         ws[i].done = &done;
-        atomic_init(&ws[i].finished, false);
-    }
-    if (cfg->use_mempool)
-    {
-        pool = mempool_create(sizeof(struct pkt_buf) + POOL_DATA_LEN,
-                              cfg->pool_size * n);
-        if (pool == NULL)
-            goto cleanup;
     }
 
     clock_gettime(CLOCK_MONOTONIC, &t0);
+    if (sn)
+    {
+        res->read_status = split_file(map, n, bounds);
+        for (i = 0; i < n; i++)
+        {
+            ws[i].begin = bounds[i];
+            ws[i].end = bounds[i + 1];
+        }
+        clock_gettime(CLOCK_MONOTONIC, &tr);
+    }
     for (started = 0; started < n; started++)
     {
-        if (pthread_create(&ws[started].tid, NULL, worker_main, &ws[started]) != 0)
+        if (pthread_create(&ws[started].tid, NULL, sn ? chunk_main : worker_main,
+                           &ws[started]) != 0)
             goto stop;
     }
     rc = 0;
+    if (sn)
+        goto stop;
 
-    while ((st = pcap_next(reader, &pkt)) == PCAP_OK)
-    {
-        uint32_t teid;
-        unsigned w = 0;   /* gói không đọc được TEID: worker 0 */
-        struct pkt_buf *b = get_buf(ws, n, pool, pkt.caplen);
-
-        if (b == NULL)
-        {
-            rc = -1;
-            break;
-        }
-        b->caplen = pkt.caplen;
-        b->orig_len = pkt.orig_len;
-        b->ts_ns = pkt.ts_ns;
-        memcpy(b->data, pkt.data, pkt.caplen);
-        if (peek_teid(b->data, b->caplen, &teid))
-            w = pick_worker(teid, n);
-        while (!ring_push(ws[w].rx, b))
-        {
-            drain_free(ws, n, pool);
-            sched_yield();
-        }
-        res->per_worker_packets[w]++;
-    }
-    res->read_status = st;
-
-stop:
-    atomic_store_explicit(&done, true, memory_order_release);
-    /* Không join ngay: worker có thể đang chờ free_ring còn chỗ, mà chỉ
-     * reader rút free_ring -> reader chờ join, worker chờ reader = deadlock.
-     * Rút free_ring tới khi mọi worker báo đã thoát rồi mới join. */
+    off = pcap_map_first(map);
     for (;;)
     {
-        bool all_finished = true;
+        size_t rec = off;
+        uint32_t teid;
+        unsigned w = 0;   /* gói không đọc được TEID: worker 0 */
 
-        drain_free(ws, n, pool);
-        for (i = 0; i < started; i++)
-        {
-            if (!atomic_load_explicit(&ws[i].finished, memory_order_acquire))
-                all_finished = false;
-        }
-        if (all_finished)
+        st = pcap_map_next(map, &off, &pkt);
+        if (st != PCAP_OK)
             break;
-        sched_yield();
+        if (peek_teid(pkt.data, pkt.caplen, &teid))
+            w = pick_worker(teid, n);
+        batches[w].items[batches[w].n++] = off_to_item(rec);
+        if (batches[w].n == batch)
+            flush_batch(&ws[w], &batches[w]);
+    }
+    res->read_status = st;
+    for (i = 0; i < n; i++)
+        flush_batch(&ws[i], &batches[i]);
+
+stop:
+    if (!sn)
+        clock_gettime(CLOCK_MONOTONIC, &tr);
+    atomic_store_explicit(&done, true, memory_order_release);
+    /* Đánh thức mọi worker đang ngủ để chúng thấy done. Lấy mutex nên worker
+     * hoặc đã cond_wait (nhận broadcast), hoặc chưa xem điều kiện (sẽ thấy
+     * done); không có khe ở giữa. */
+    for (i = 0; i < started; i++)
+    {
+        pthread_mutex_lock(&ws[i].lock);
+        pthread_cond_broadcast(&ws[i].wake);
+        pthread_mutex_unlock(&ws[i].lock);
     }
     for (i = 0; i < started; i++)
         pthread_join(ws[i].tid, NULL);
-    drain_free(ws, n, pool);
     clock_gettime(CLOCK_MONOTONIC, &t1);
 
     if (rc == 0)
@@ -347,12 +453,15 @@ stop:
         {
             stats_merge(&res->total, &ws[i].stats);
             res->dropped_sessions += ws[i].dropped_sessions;
+            res->per_worker_packets[i] = ws[i].stats.packets;
+            res->per_worker_cpu_sec[i] = ws[i].cpu_sec;
+            res->per_worker_sleeps[i] = ws[i].sleeps;
             res->tables[i] = ws[i].table;   /* chuyển quyền sở hữu sang res */
             ws[i].table = NULL;
         }
         res->n_workers = n;
-        res->elapsed_sec = (double)(t1.tv_sec - t0.tv_sec) +
-                           (double)(t1.tv_nsec - t0.tv_nsec) / 1e9;
+        res->elapsed_sec = ts_sec(&t1) - ts_sec(&t0);
+        res->reader_sec = ts_sec(&tr) - ts_sec(&t0);
     }
 
 cleanup:
@@ -361,13 +470,17 @@ cleanup:
         for (i = 0; i < n; i++)
         {
             ring_destroy(ws[i].rx);
-            ring_destroy(ws[i].free_ring);
             session_table_destroy(ws[i].table);
+        }
+        for (i = 0; i < n_sync; i++)
+        {
+            pthread_cond_destroy(&ws[i].wake);
+            pthread_mutex_destroy(&ws[i].lock);
         }
     }
     free(ws);
-    mempool_destroy(pool);
-    pcap_close(reader);
+    free(batches);
+    pcap_map_close(map);
     return rc;
 }
 

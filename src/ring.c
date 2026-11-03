@@ -157,6 +157,49 @@ bool ring_pop(struct ring *r, void **item)
     return true;
 }
 
+/* Cùng memory ordering với ring_push, chỉ khác: ghi cả lô rồi mới công bố
+ * head một lần. */
+size_t ring_push_bulk(struct ring *r, void *const *items, size_t n)
+{
+    size_t h = atomic_load_explicit(&r->head, memory_order_relaxed);
+    size_t cap = r->mask + 1u;
+    size_t room = cap - (h - r->tail_cache);
+    size_t i;
+
+    if (room < n)
+    {
+        r->tail_cache = atomic_load_explicit(&r->tail, memory_order_acquire);
+        room = cap - (h - r->tail_cache);
+        if (n > room)
+            n = room;
+    }
+    for (i = 0; i < n; i++)
+        r->slots[(h + i) & r->mask] = items[i];
+    if (n > 0)
+        atomic_store_explicit(&r->head, h + n, memory_order_release);
+    return n;
+}
+
+size_t ring_pop_bulk(struct ring *r, void **items, size_t max)
+{
+    size_t t = atomic_load_explicit(&r->tail, memory_order_relaxed);
+    size_t avail = r->head_cache - t;
+    size_t i;
+
+    if (avail < max)
+    {
+        r->head_cache = atomic_load_explicit(&r->head, memory_order_acquire);
+        avail = r->head_cache - t;
+    }
+    if (max > avail)
+        max = avail;
+    for (i = 0; i < max; i++)
+        items[i] = r->slots[(t + i) & r->mask];
+    if (max > 0)
+        atomic_store_explicit(&r->tail, t + max, memory_order_release);
+    return max;
+}
+
 /* ring_count: head - tail, cả hai load relaxed. */
 size_t ring_count(const struct ring *r)
 {

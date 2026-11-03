@@ -10,6 +10,10 @@
 #include <stdio.h>   /* FILE, fopen, fread, fclose */
 #include <stdlib.h>  /* malloc, calloc, free */
 #include <string.h>  /* memcpy */
+#include <fcntl.h>     /* open, O_RDONLY */
+#include <sys/mman.h>  /* mmap, munmap, posix_madvise */
+#include <sys/stat.h>  /* fstat, S_ISREG */
+#include <unistd.h>    /* close */
 
 #include "bytes.h" /* rd_le32, rd_be32, rd_le16, rd_be16 */
 
@@ -60,6 +64,56 @@ static uint32_t rd32(bool big_endian, const uint8_t *p)
     return big_endian ? rd_be32(p) : rd_le32(p);
 }
 
+/* Kiểm tra global header 24 byte. Dùng chung cho reader stream và reader
+ * mmap để hai bên trả đúng cùng một lỗi cho cùng một file. */
+static enum pcap_status parse_global_header(const uint8_t *hdr,
+                                            bool *big_endian, bool *nanosec,
+                                            uint32_t *snaplen)
+{
+    /* Đọc magic kiểu little-endian rồi so với cả 4 giá trị có thể. */
+    switch (rd_le32(hdr))
+    {
+    case PCAP_MAGIC_US:
+        *big_endian = false;
+        *nanosec = false;
+        break;
+    case PCAP_MAGIC_NS:
+        *big_endian = false;
+        *nanosec = true;
+        break;
+    case PCAP_MAGIC_US_SWAPPED:
+        *big_endian = true;
+        *nanosec = false;
+        break;
+    case PCAP_MAGIC_NS_SWAPPED:
+        *big_endian = true;
+        *nanosec = true;
+        break;
+    default:
+        return PCAP_ERR_BAD_MAGIC;
+    }
+
+    *snaplen = rd32(*big_endian, hdr + PCAP_GH_OFF_SNAPLEN);
+    if (rd32(*big_endian, hdr + PCAP_GH_OFF_LINKTYPE) != PCAP_LINKTYPE_ETHERNET)
+        return PCAP_ERR_UNSUPPORTED_LINKTYPE;
+    return PCAP_OK;
+}
+
+/* Record header 16 byte -> caplen, orig_len, ts_ns (chưa đụng tới data). */
+static void decode_record(bool big_endian, bool nanosec, const uint8_t *rec,
+                          struct pcap_packet *pkt)
+{
+    uint32_t ts_sec = rd32(big_endian, rec + PCAP_REC_OFF_TS_SEC);
+    uint32_t ts_frac = rd32(big_endian, rec + PCAP_REC_OFF_TS_FRAC);
+
+    pkt->caplen = rd32(big_endian, rec + PCAP_REC_OFF_CAPLEN);
+    pkt->orig_len = rd32(big_endian, rec + PCAP_REC_OFF_ORIG_LEN);
+    /* Ép uint64_t TRƯỚC khi nhân để không tràn 32 bit. */
+    pkt->ts_ns = (uint64_t)ts_sec * PCAP_NS_PER_SEC +
+                 (nanosec ? (uint64_t)ts_frac
+                          : (uint64_t)ts_frac * PCAP_NS_PER_US);
+}
+
 /* Định nghĩa đầy đủ ở đây, người dùng ngoài file này chỉ thấy con trỏ. */
 struct pcap_reader
 {
@@ -78,7 +132,7 @@ enum pcap_status pcap_open(const char *path, struct pcap_reader **out)
     uint8_t *buf = NULL;
     uint8_t hdr[PCAP_GLOBAL_HEADER_LEN];
     bool big_endian = false, nanosec = false;
-    uint32_t snaplen, linktype;
+    uint32_t snaplen;
     size_t n;
     enum pcap_status st;
 
@@ -99,37 +153,9 @@ enum pcap_status pcap_open(const char *path, struct pcap_reader **out)
         goto fail;
     }
 
-    /* Đọc magic kiểu little-endian rồi so với cả 4 giá trị có thể. */
-    switch (rd_le32(hdr))
-    {
-    case PCAP_MAGIC_US:
-        big_endian = false;
-        nanosec = false;
-        break;
-    case PCAP_MAGIC_NS:
-        big_endian = false;
-        nanosec = true;
-        break;
-    case PCAP_MAGIC_US_SWAPPED:
-        big_endian = true;
-        nanosec = false;
-        break;
-    case PCAP_MAGIC_NS_SWAPPED:
-        big_endian = true;
-        nanosec = true;
-        break;
-    default:
-        st = PCAP_ERR_BAD_MAGIC;
+    st = parse_global_header(hdr, &big_endian, &nanosec, &snaplen);
+    if (st != PCAP_OK)
         goto fail;
-    }
-
-    snaplen = rd32(big_endian, hdr + PCAP_GH_OFF_SNAPLEN);
-    linktype = rd32(big_endian, hdr + PCAP_GH_OFF_LINKTYPE);
-    if (linktype != PCAP_LINKTYPE_ETHERNET)
-    {
-        st = PCAP_ERR_UNSUPPORTED_LINKTYPE;
-        goto fail;
-    }
 
     r = calloc(1, sizeof *r);
     buf = malloc(PCAP_MAX_CAPLEN);
@@ -189,7 +215,6 @@ static enum pcap_status set_last(struct pcap_reader *r, enum pcap_status st)
 enum pcap_status pcap_next(struct pcap_reader *r, struct pcap_packet *pkt)
 {
     uint8_t rec[PCAP_RECORD_HEADER_LEN];
-    uint32_t ts_sec, ts_frac, caplen, orig_len;
     size_t n;
 
     /* Đã gặp EOF hoặc lỗi trước đó: trả lại đúng trạng thái, không đọc nữa. */
@@ -208,30 +233,20 @@ enum pcap_status pcap_next(struct pcap_reader *r, struct pcap_packet *pkt)
     }
 
     /* 2. Các trường theo endianness của file. */
-    ts_sec = rd32(r->big_endian, rec + PCAP_REC_OFF_TS_SEC);
-    ts_frac = rd32(r->big_endian, rec + PCAP_REC_OFF_TS_FRAC);
-    caplen = rd32(r->big_endian, rec + PCAP_REC_OFF_CAPLEN);
-    orig_len = rd32(r->big_endian, rec + PCAP_REC_OFF_ORIG_LEN);
+    decode_record(r->big_endian, r->nanosec, rec, pkt);
 
     /* 3. Không tin caplen: buffer chỉ có PCAP_MAX_CAPLEN byte. */
-    if (caplen > PCAP_MAX_CAPLEN)
+    if (pkt->caplen > PCAP_MAX_CAPLEN)
         return set_last(r, PCAP_ERR_CAPLEN_TOO_LARGE);
 
     /* 4. Dữ liệu gói. */
-    n = fread(r->buf, 1, caplen, r->fp);
-    if (n < caplen)
+    n = fread(r->buf, 1, pkt->caplen, r->fp);
+    if (n < pkt->caplen)
     {
         return set_last(r, ferror(r->fp) ? PCAP_ERR_IO
                                          : PCAP_ERR_TRUNCATED_RECORD);
     }
-
-    /* 5. Điền kết quả. Ép uint64_t TRƯỚC khi nhân để không tràn 32 bit. */
     pkt->data = r->buf;
-    pkt->caplen = caplen;
-    pkt->orig_len = orig_len;
-    pkt->ts_ns = (uint64_t)ts_sec * PCAP_NS_PER_SEC +
-                 (r->nanosec ? (uint64_t)ts_frac
-                             : (uint64_t)ts_frac * PCAP_NS_PER_US);
     return PCAP_OK;
 }
 
@@ -283,4 +298,119 @@ const char *pcap_status_str(enum pcap_status s)
         return "caplen_too_large";
     }
     return "unknown"; /* giá trị ngoài enum */
+}
+/*
+ * Reader mmap (v2)
+ *
+ * Vì sao: reader stream chép mỗi gói hai lần (kernel -> buffer stdio ->
+ * r->buf), và pipeline v1 chép thêm lần nữa vào buffer pool. Với mmap, page
+ * cache được ánh xạ thẳng vào địa chỉ của process: không chép, và nhiều
+ * luồng đọc chung được vì vùng map chỉ đọc.
+ */
+struct pcap_map
+{
+    const uint8_t *base;
+    size_t size;
+    bool big_endian;
+    bool nanosec;
+};
+
+enum pcap_status pcap_map_open(const char *path, struct pcap_map **out)
+{
+    struct pcap_map *m = NULL;
+    struct stat sb;
+    void *base;
+    bool big_endian = false, nanosec = false;
+    uint32_t snaplen;
+    enum pcap_status st;
+    size_t size;
+    int fd;
+
+    *out = NULL;
+    fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return PCAP_ERR_IO;
+    if (fstat(fd, &sb) != 0 || !S_ISREG(sb.st_mode))
+    {
+        close(fd);
+        return PCAP_ERR_IO;
+    }
+    if ((uintmax_t)sb.st_size < PCAP_GLOBAL_HEADER_LEN)
+    {
+        close(fd);
+        return PCAP_ERR_TRUNCATED_GLOBAL_HEADER;
+    }
+    if ((uintmax_t)sb.st_size > SIZE_MAX)
+    {
+        close(fd);
+        return PCAP_ERR_NOMEM;   /* không map nổi vào không gian địa chỉ */
+    }
+    size = (size_t)sb.st_size;
+
+    base = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);   /* mapping giữ file mở, không cần fd nữa */
+    if (base == MAP_FAILED)
+        return PCAP_ERR_IO;
+    /* Chỉ là gợi ý cho kernel đọc trước; lỗi cũng không sao. */
+    (void)posix_madvise(base, size, POSIX_MADV_SEQUENTIAL);
+
+    st = parse_global_header(base, &big_endian, &nanosec, &snaplen);
+    if (st == PCAP_OK)
+    {
+        m = malloc(sizeof *m);
+        if (m == NULL)
+            st = PCAP_ERR_NOMEM;
+    }
+    if (st != PCAP_OK)
+    {
+        munmap(base, size);
+        return st;
+    }
+    m->base = base;
+    m->size = size;
+    m->big_endian = big_endian;
+    m->nanosec = nanosec;
+    *out = m;
+    return PCAP_OK;
+}
+
+void pcap_map_close(struct pcap_map *m)
+{
+    if (m == NULL)
+        return;
+    /* munmap nhận void*, vùng map vốn do mmap trả về dạng void*. */
+    munmap((void *)(uintptr_t)m->base, m->size);
+    free(m);
+}
+
+size_t pcap_map_first(const struct pcap_map *m)
+{
+    (void)m;
+    return PCAP_GLOBAL_HEADER_LEN;
+}
+
+size_t pcap_map_size(const struct pcap_map *m)
+{
+    return m->size;
+}
+
+enum pcap_status pcap_map_next(const struct pcap_map *m, size_t *off,
+                               struct pcap_packet *pkt)
+{
+    size_t left;
+
+    if (*off >= m->size)
+        return PCAP_EOF;
+    left = m->size - *off;
+    if (left < PCAP_RECORD_HEADER_LEN)
+        return PCAP_ERR_TRUNCATED_RECORD;
+    decode_record(m->big_endian, m->nanosec, m->base + *off, pkt);
+    /* Cùng thứ tự kiểm tra với pcap_next để cùng file ra cùng lỗi. */
+    if (pkt->caplen > PCAP_MAX_CAPLEN)
+        return PCAP_ERR_CAPLEN_TOO_LARGE;
+    if (pkt->caplen > left - PCAP_RECORD_HEADER_LEN)
+        return PCAP_ERR_TRUNCATED_RECORD;
+    pkt->data = m->base + *off + PCAP_RECORD_HEADER_LEN;
+    *off += PCAP_RECORD_HEADER_LEN + pkt->caplen;
+    return PCAP_OK;
 }

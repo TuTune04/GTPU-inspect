@@ -20,13 +20,14 @@ namespace {
 struct Sequential {
   stats st;
   session_table *sessions = session_table_create(16);
+  pcap_status final_status = PCAP_OK;
 
   explicit Sequential(const std::string &path) {
     stats_init(&st);
     pcap_reader *r = nullptr;
     EXPECT_EQ(pcap_open(path.c_str(), &r), PCAP_OK);
     pcap_packet pkt;
-    while (pcap_next(r, &pkt) == PCAP_OK) {
+    while ((final_status = pcap_next(r, &pkt)) == PCAP_OK) {
       pkt_info info;
       parse_result res = parse_packet(pkt.data, pkt.caplen, &info);
       stats_record(&st, sessions, res, &info, pkt.orig_len, pkt.ts_ns);
@@ -36,50 +37,80 @@ struct Sequential {
   ~Sequential() { session_table_destroy(sessions); }
 };
 
+struct Merge {
+  session_table *dst;
+  int inexact = 0;
+};
+
+// Gộp như main: phiên mới thì chép, đã có thì session_merge (theo thứ tự
+// bảng = thứ tự đoạn file ở chế độ shared-nothing).
+void merge_into(const session *s, void *arg) {
+  Merge *m = static_cast<Merge *>(arg);
+  session *d = session_table_upsert(m->dst, &s->key);
+  ASSERT_NE(d, nullptr);
+  if (!session_merge(d, s)) m->inexact++;
+}
+
 struct Lookup {
   const session_table *seq;
   int mismatches = 0;
 };
 
-// Mỗi phiên của worker phải có ở bản tuần tự với cùng counter.
+// Mỗi phiên đã gộp phải có ở bản tuần tự với cùng mọi counter.
 void check_session(const session *s, void *arg) {
   Lookup *l = static_cast<Lookup *>(arg);
   const session *e = session_table_find(l->seq, &s->key);
   if (e == nullptr || e->packets != s->packets || e->bytes != s->bytes ||
-      e->n_flows != s->n_flows)
+      e->first_ts_ns != s->first_ts_ns || e->last_ts_ns != s->last_ts_ns ||
+      e->last_qfi != s->last_qfi || e->n_flows != s->n_flows ||
+      e->flows_overflow != s->flows_overflow)
     l->mismatches++;
 }
 
-void expect_same_as_sequential(const std::string &name, unsigned workers,
-                               size_t ring_capacity, size_t pool_size,
-                               bool use_mempool) {
+// Trả tổng số lần các worker ngủ trên condvar.
+uint64_t expect_same_as_sequential(const std::string &name, unsigned workers,
+                                   size_t ring_capacity, size_t batch = 1,
+                                   bool shared_nothing = false) {
   SCOPED_TRACE(name + " workers=" + std::to_string(workers) +
-               " mempool=" + std::to_string(use_mempool));
+               " ring=" + std::to_string(ring_capacity) +
+               " batch=" + std::to_string(batch) +
+               " shared_nothing=" + std::to_string(shared_nothing));
   const std::string path = data_path(name + ".pcap");
   Sequential seq(path);
-  pipeline_config cfg = {path.c_str(), workers, ring_capacity, pool_size,
-                         use_mempool};
+  pipeline_config cfg = {path.c_str(), workers, ring_capacity, batch,
+                         shared_nothing};
   pipeline_result res;
 
-  ASSERT_EQ(pipeline_run(&cfg, &res), 0);
-  EXPECT_EQ(res.read_status, PCAP_EOF);
-  ASSERT_EQ(res.n_workers, workers);
+  if (pipeline_run(&cfg, &res) != 0) {
+    ADD_FAILURE() << "pipeline_run lỗi";
+    return 0;
+  }
+  EXPECT_EQ(res.read_status, seq.final_status);
+  EXPECT_EQ(res.n_workers, workers);
   EXPECT_EQ(std::memcmp(&res.total, &seq.st, sizeof seq.st), 0);
 
-  uint64_t dispatched = 0;
+  uint64_t dispatched = 0, sleeps = 0;
   size_t sessions = 0;
-  Lookup lookup{seq.sessions};
+  Merge merge{session_table_create(16)};
   for (unsigned i = 0; i < workers; i++) {
     dispatched += res.per_worker_packets[i];
+    sleeps += res.per_worker_sleeps[i];
     sessions += session_table_size(res.tables[i]);
-    session_table_foreach(res.tables[i], check_session, &lookup);
+    session_table_foreach(res.tables[i], merge_into, &merge);
   }
   EXPECT_EQ(dispatched, seq.st.packets);
-  // Bằng nhau về số lượng + mọi phiên đều khớp => không phiên nào bị chia
-  // sang hai worker.
-  EXPECT_EQ(sessions, session_table_size(seq.sessions));
+  // Dispatch theo TEID: không phiên nào bị chia sang hai worker.
+  if (!shared_nothing) {
+    EXPECT_EQ(sessions, session_table_size(seq.sessions));
+  }
+  EXPECT_EQ(merge.inexact, 0);  // fixture không có phiên nào > 8 luồng
+  Lookup lookup{seq.sessions};
+  EXPECT_EQ(session_table_size(merge.dst), session_table_size(seq.sessions));
+  session_table_foreach(merge.dst, check_session, &lookup);
   EXPECT_EQ(lookup.mismatches, 0);
+  session_table_destroy(merge.dst);
   pipeline_result_free(&res);
+  return sleeps;
 }
 
 }  // namespace
@@ -88,35 +119,76 @@ TEST(Pipeline, MatchesSequentialOnFixtures) {
   for (const char *name : {"gtpu_basic", "gtpu_optional_fields", "gtpu_5g_ext",
                            "gtpu_signalling", "malformed", "non_gtpu"})
     for (unsigned workers : {1u, 2u, 4u})
-      for (bool pool : {true, false})
-        expect_same_as_sequential(name, workers, 1024, 64, pool);
+      expect_same_as_sequential(name, workers, 1024);
 }
 
-TEST(Pipeline, TinyRingsAndPoolApplyBackpressure) {
-  // Ring 2 slot, pool 1 buffer mỗi worker: reader liên tục phải chờ worker
-  // trả buffer, nhưng không được mất hay lặp gói nào.
+TEST(Pipeline, TinyRingsApplyBackpressure) {
+  // Ring 2 slot: reader liên tục phải chờ worker, nhưng không được mất hay
+  // lặp gói nào.
   for (unsigned workers : {1u, 3u})
-    expect_same_as_sequential("gtpu_basic", workers, 2, 1, true);
+    expect_same_as_sequential("gtpu_basic", workers, 2);
+}
+
+TEST(Pipeline, BatchesMatchSequential) {
+  // Lô lớn hơn số gói của file (chỉ flush ở cuối), lô vừa, và lô bằng đúng
+  // capacity của ring (ring 4 slot, lô 4: mỗi flush lấp đầy ring).
+  for (const char *name : {"gtpu_basic", "malformed", "gtpu_5g_ext"})
+    for (unsigned workers : {1u, 3u}) {
+      expect_same_as_sequential(name, workers, 1024, 256);
+      expect_same_as_sequential(name, workers, 1024, 7);
+      expect_same_as_sequential(name, workers, 4, 4);
+    }
+}
+
+TEST(Pipeline, SharedNothingMatchesSequential) {
+  // Kể cả nhiều worker hơn số gói (vài đoạn rỗng) và file cắt cụt giữa
+  // chừng (phải dừng đúng chỗ và báo đúng lỗi như reader tuần tự).
+  for (const char *name : {"gtpu_basic", "gtpu_optional_fields", "gtpu_5g_ext",
+                           "gtpu_signalling", "malformed", "non_gtpu",
+                           "pcap_empty", "bad_pcap_truncated_record"})
+    for (unsigned workers : {1u, 2u, 3u, 8u, 64u})
+      expect_same_as_sequential(name, workers, 1024, 1, true);
+}
+
+TEST(Pipeline, TruncatedFileMatchesSequential) {
+  for (unsigned workers : {1u, 3u})
+    expect_same_as_sequential("bad_pcap_truncated_record", workers, 1024);
+}
+
+TEST(Pipeline, RepeatedRunsNeverHang) {
+  // Worker ngủ trên condvar khi ring rỗng lâu; một lần mất tín hiệu đánh
+  // thức là một lần treo. File nhỏ + nhiều worker + lô 1: reader liên tục
+  // đẩy vào đúng lúc worker vừa quyết định ngủ. Treo -> ctest timeout.
+  uint64_t sleeps = 0;
+  for (int run = 0; run < 300; run++)
+    sleeps += expect_same_as_sequential(run % 2 ? "gtpu_basic" : "malformed",
+                                        static_cast<unsigned>(1 + run % 6), 4, 1);
+  // Phải thật sự đi qua nhánh ngủ/đánh thức, không thì test không chứng
+  // minh được gì.
+  EXPECT_GT(sleeps, 0u);
 }
 
 TEST(Pipeline, RejectsBadConfig) {
   const std::string path = data_path("gtpu_basic.pcap");
   pipeline_result res;
-  pipeline_config cfg = {path.c_str(), 0, 1024, 64, true};
+  pipeline_config cfg = {path.c_str(), 0, 1024, 1, false};
   EXPECT_NE(pipeline_run(&cfg, &res), 0);
   cfg.n_workers = PIPELINE_MAX_WORKERS + 1;
   EXPECT_NE(pipeline_run(&cfg, &res), 0);
   cfg.n_workers = 2;
   cfg.ring_capacity = 1000;  // không phải lũy thừa 2
   EXPECT_NE(pipeline_run(&cfg, &res), 0);
+  cfg.ring_capacity = 16;
+  cfg.batch = 32;  // lô lớn hơn ring: không bao giờ đẩy trọn một lô
+  EXPECT_NE(pipeline_run(&cfg, &res), 0);
+  cfg.batch = PIPELINE_MAX_BATCH + 1;
   cfg.ring_capacity = 1024;
-  cfg.pool_size = 0;
   EXPECT_NE(pipeline_run(&cfg, &res), 0);
 }
 
 TEST(Pipeline, ReportsOpenError) {
   const std::string path = data_path("does_not_exist.pcap");
-  pipeline_config cfg = {path.c_str(), 2, 1024, 64, true};
+  pipeline_config cfg = {path.c_str(), 2, 1024, 1, false};
   pipeline_result res;
   EXPECT_NE(pipeline_run(&cfg, &res), 0);
   EXPECT_EQ(res.read_status, PCAP_ERR_IO);
