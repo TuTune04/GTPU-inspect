@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 #include "expected.hpp"
 #include "parser.h"
@@ -129,4 +130,92 @@ TEST(Stats, PrintMentionsTopSession) {
   EXPECT_NE(out.find("Packets: 8"), std::string::npos);
   EXPECT_NE(out.find("G-PDU (255)"), std::string::npos);
   EXPECT_NE(out.find("0x00001001"), std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// session_merge (v2): gộp hai nửa theo thứ tự thời gian phải ra đúng như
+// session_account trên cả chuỗi gói.
+// ---------------------------------------------------------------------------
+namespace {
+
+pkt_info flow_packet(unsigned flow, uint8_t qfi) {
+  pkt_info info{};
+  info.has_inner = true;
+  info.inner_src_ip = 0x0a000001u + flow;
+  info.inner_dst_ip = 0x08080808u;
+  info.inner_sport = static_cast<uint16_t>(1000 + flow);
+  info.inner_dport = 443;
+  info.inner_proto = 6;
+  info.gtp.has_qfi = qfi != 0;
+  info.gtp.qfi = qfi;
+  return info;
+}
+
+bool same_session(const session &a, const session &b) {
+  if (a.packets != b.packets || a.bytes != b.bytes ||
+      a.first_ts_ns != b.first_ts_ns || a.last_ts_ns != b.last_ts_ns ||
+      a.last_qfi != b.last_qfi || a.n_flows != b.n_flows ||
+      a.flows_overflow != b.flows_overflow)
+    return false;
+  for (unsigned i = 0; i < a.n_flows; i++) {
+    const inner_flow &x = a.flows[i], &y = b.flows[i];
+    if (x.src_ip != y.src_ip || x.sport != y.sport || x.packets != y.packets ||
+        x.bytes != y.bytes)
+      return false;
+  }
+  return true;
+}
+
+}  // namespace
+
+TEST(SessionMerge, SplitAnywhereMatchesSequential) {
+  // 12 luồng (> SESSION_MAX_FLOWS) xen kẽ, QFI lúc có lúc không, ts không
+  // đơn điệu: mọi điểm cắt đều phải cho đúng tổng; khi merge báo exact thì
+  // phải giống hệt từng trường.
+  std::vector<pkt_info> pkts;
+  std::vector<uint64_t> ts;
+  for (unsigned i = 0; i < 60; i++) {
+    unsigned flow = (i * 7 + i / 5) % 12;
+    pkts.push_back(flow_packet(flow, static_cast<uint8_t>(i % 3 == 0 ? 0 : 1 + i % 9)));
+    ts.push_back(1000 + (i * 37) % 23);
+  }
+  session seq{};
+  for (size_t i = 0; i < pkts.size(); i++)
+    session_account(&seq, &pkts[i], static_cast<uint32_t>(100 + i), ts[i]);
+
+  int exact_splits = 0;
+  for (size_t cut = 0; cut <= pkts.size(); cut++) {
+    SCOPED_TRACE("cut=" + std::to_string(cut));
+    session a{}, b{};
+    for (size_t i = 0; i < cut; i++)
+      session_account(&a, &pkts[i], static_cast<uint32_t>(100 + i), ts[i]);
+    for (size_t i = cut; i < pkts.size(); i++)
+      session_account(&b, &pkts[i], static_cast<uint32_t>(100 + i), ts[i]);
+    bool exact = session_merge(&a, &b);
+    EXPECT_EQ(a.packets, seq.packets);
+    EXPECT_EQ(a.bytes, seq.bytes);
+    EXPECT_EQ(a.first_ts_ns, seq.first_ts_ns);
+    EXPECT_EQ(a.last_ts_ns, seq.last_ts_ns);
+    EXPECT_EQ(a.last_qfi, seq.last_qfi);
+    if (exact) {
+      exact_splits++;
+      EXPECT_TRUE(same_session(a, seq));
+    }
+  }
+  EXPECT_GT(exact_splits, 2);  // ít nhất cắt ở hai đầu và vài chỗ đầu chuỗi
+}
+
+TEST(SessionMerge, FewFlowsAlwaysExact) {
+  // Không vượt SESSION_MAX_FLOWS thì không có overflow: luôn exact.
+  std::vector<pkt_info> pkts;
+  for (unsigned i = 0; i < 40; i++) pkts.push_back(flow_packet(i % 5, 0));
+  session seq{};
+  for (size_t i = 0; i < pkts.size(); i++) session_account(&seq, &pkts[i], 64, i);
+  for (size_t cut = 0; cut <= pkts.size(); cut++) {
+    session a{}, b{};
+    for (size_t i = 0; i < cut; i++) session_account(&a, &pkts[i], 64, i);
+    for (size_t i = cut; i < pkts.size(); i++) session_account(&b, &pkts[i], 64, i);
+    EXPECT_TRUE(session_merge(&a, &b));
+    EXPECT_TRUE(same_session(a, seq)) << "cut=" << cut;
+  }
 }
