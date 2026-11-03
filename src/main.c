@@ -2,11 +2,12 @@
  * main.c — chương trình gtpu-inspect.                        [TUẦN 1 -> 3]
  *
  * Cách dùng mục tiêu:
- *   gtpu-inspect [-v] [-n TOP] [-w WORKERS [-b BATCH]] file.pcap
+ *   gtpu-inspect [-v] [-n TOP] [-w WORKERS [-b BATCH] [-S]] file.pcap
  *     -v          in mỗi gói một dòng (tuần 1)
  *     -n TOP      số phiên trong bảng top N (tuần 2, mặc định 10)
  *     -w WORKERS  số luồng worker (tuần 3; 0 = chạy tuần tự, không thread)
  *     -b BATCH    với -w: số gói mỗi lần đẩy qua ring (v2, mặc định 32)
+ *     -S          với -w: shared-nothing, mỗi worker tự đọc một đoạn file (v2)
  *
  * CTest tự chạy chương trình trên mọi file .pcap trong tests/data/ (test cli.*):
  * chỉ fail khi crash hoặc sanitizer báo lỗi.
@@ -63,7 +64,7 @@
  */
 static void usage(const char *prog)
 {
-    fprintf(stderr, "usage: %s [-v] [-n TOP] [-w WORKERS [-b BATCH]] file.pcap\n",
+    fprintf(stderr, "usage: %s [-v] [-n TOP] [-w WORKERS [-b BATCH] [-S]] file.pcap\n",
             prog);
 }
 
@@ -107,20 +108,22 @@ static bool parse_ulong(const char *s, unsigned long *out)
 struct merge_ctx {
     struct session_table *dst;
     uint64_t              failed;
+    uint64_t              inexact;   /* session_merge trả false */
 };
 
-/* Dispatch theo TEID nên các bảng worker không chung key nào: chép nguyên
- * phiên sang bảng gộp là đủ. Gộp vào một bảng để stats_print in top N giống
- * hệt chế độ tuần tự. */
+/* Gộp các bảng worker vào một bảng để stats_print in top N giống hệt chế độ
+ * tuần tự. Dispatch theo TEID thì các bảng không chung key nào (luôn rơi vào
+ * nhánh chép); shared-nothing thì một phiên có thể ở nhiều bảng, và duyệt
+ * bảng theo thứ tự worker = thứ tự đoạn file như session_merge yêu cầu. */
 static void merge_session(const struct session *s, void *arg)
 {
     struct merge_ctx *ctx = arg;
     struct session *d = session_table_upsert(ctx->dst, &s->key);
 
-    if (d == NULL || d->packets != 0)
+    if (d == NULL)
         ctx->failed++;
-    else
-        *d = *s;
+    else if (!session_merge(d, s))
+        ctx->inexact++;
 }
 
 /* [TUẦN 3] -w WORKERS: chạy pipeline thay cho vòng lặp tuần tự. */
@@ -128,7 +131,7 @@ static int run_pipeline(const struct pipeline_config *cfg, size_t top_n)
 {
     const char *path = cfg->path;
     struct pipeline_result res;
-    struct merge_ctx ctx = {NULL, 0};
+    struct merge_ctx ctx = {NULL, 0, 0};
     unsigned i;
 
     if (pipeline_run(cfg, &res) != 0)
@@ -157,13 +160,20 @@ static int run_pipeline(const struct pipeline_config *cfg, size_t top_n)
     if (res.dropped_sessions > 0 || ctx.failed > 0)
         fprintf(stderr, "không thêm được phiên cho %" PRIu64 " gói, %" PRIu64
                 " phiên khi gộp\n", res.dropped_sessions, ctx.failed);
+    if (ctx.inexact > 0)
+        fprintf(stderr, "%" PRIu64 " phiên có > %u luồng bị chia giữa các đoạn:"
+                " cột Flows có thể khác chạy tuần tự (tổng gói/byte vẫn đúng)\n",
+                ctx.inexact, SESSION_MAX_FLOWS);
 
     /* Số đo cho benchmark, ra stderr để stdout giống hệt chế độ tuần tự. */
-    fprintf(stderr, "pipeline: %u worker, lô %zu, %" PRIu64 " gói trong %.3f s"
-            " (%.2f Mpps)\n", res.n_workers, cfg->batch, res.total.packets, res.elapsed_sec,
+    fprintf(stderr, "pipeline: %u worker, %s, %" PRIu64 " gói trong %.3f s"
+            " (%.2f Mpps)\n", res.n_workers,
+            cfg->shared_nothing ? "shared-nothing" : "reader + ring",
+            res.total.packets, res.elapsed_sec,
             res.elapsed_sec > 0 ? (double)res.total.packets / res.elapsed_sec / 1e6
                                 : 0.0);
-    fprintf(stderr, "  reader: %.3f s\n", res.reader_sec);
+    fprintf(stderr, "  %s: %.3f s\n",
+            cfg->shared_nothing ? "chia file" : "reader", res.reader_sec);
     for (i = 0; i < res.n_workers; i++)
         fprintf(stderr, "  worker %u: %" PRIu64 " gói, cpu %.3f s\n", i,
                 res.per_worker_packets[i], res.per_worker_cpu_sec[i]);
@@ -194,7 +204,7 @@ int main(int argc, char **argv)
     unsigned long v;
     int opt;
 
-    while ((opt = getopt(argc, argv, "vn:w:b:")) != -1)
+    while ((opt = getopt(argc, argv, "vn:w:b:S")) != -1)
     {
         if (opt == 'v')
         {
@@ -213,6 +223,10 @@ int main(int argc, char **argv)
                  v <= PIPELINE_MAX_BATCH)
         {
             cfg.batch = (size_t)v;
+        }
+        else if (opt == 'S')
+        {
+            cfg.shared_nothing = true;
         }
         else
         {

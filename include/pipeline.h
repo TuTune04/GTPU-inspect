@@ -31,6 +31,8 @@ struct pipeline_config {
     size_t      ring_capacity;  /* lũy thừa 2, ví dụ 1024 */
     size_t      batch;          /* số gói mỗi lần push, 0/1 = từng gói;
                                    <= PIPELINE_MAX_BATCH và <= ring_capacity */
+    bool        shared_nothing; /* true: không reader, mỗi worker một đoạn file;
+                                   phiên phải gộp bằng session_merge */
 };
 
 struct pipeline_result {
@@ -41,7 +43,8 @@ struct pipeline_result {
     uint64_t               dropped_sessions;  /* stats_record trả -1 */
     enum pcap_status       read_status;       /* PCAP_EOF nếu đọc hết file */
     double                 elapsed_sec;       /* tạo worker -> join xong */
-    double                 reader_sec;        /* riêng vòng đọc của reader */
+    double                 reader_sec;        /* vòng đọc của reader; shared-
+                                                 nothing: thời gian chia file */
     double                 per_worker_cpu_sec[PIPELINE_MAX_WORKERS];
 };
 

@@ -34,6 +34,15 @@
  *   worker: reader ghi lô liên tục, worker ghi stats liên tục, chung cache
  *   line là false sharing.
  *
+ * v2: SHARED-NOTHING (cfg->shared_nothing)
+ *   Pipeline vẫn buộc mọi gói đi qua MỘT reader, nên reader là trần thông
+ *   lượng. Chế độ này bỏ reader: luồng chính chỉ duyệt record header để chia
+ *   file thành n đoạn gần bằng nhau về byte (pcap không có chỉ mục, không
+ *   nhảy được vào giữa file mà chắc chắn tìm ra đầu record), rồi mỗi worker
+ *   tự parse đoạn của mình. Không ring, không đồng bộ trong lúc chạy.
+ *   Cái giá: một phiên có thể nằm ở nhiều worker, nên main phải gộp bằng
+ *   session_merge theo thứ tự đoạn, và mất thứ tự xử lý trong một phiên.
+ *
  * RING ĐẦY / RỖNG
  *   Ring đầy: reader sched_yield() rồi thử lại. Ring rỗng: worker tương tự.
  */
@@ -67,6 +76,7 @@ struct worker {
     uint64_t               dropped_sessions;
     double                 cpu_sec;   /* CPU của riêng luồng này */
     const _Atomic bool    *done;
+    size_t                 begin, end; /* shared-nothing: đoạn [begin, end) */
 };
 
 /* Lô offset reader đang gom cho một worker. Chỉ reader chạm vào. */
@@ -130,19 +140,21 @@ static unsigned pick_worker(uint32_t teid, unsigned n)
     return (unsigned)(((uint64_t)h * n) >> 32);
 }
 
-static void process(struct worker *w, size_t off)
+/* Xử lý record tại *off và đưa *off tới record kế. */
+static bool process(struct worker *w, size_t *off)
 {
     struct pcap_packet pkt;
     struct pkt_info info;
     enum parse_result r;
 
-    /* Reader đã đọc thành công record này và vùng map chỉ đọc, nên đọc lại
-     * luôn OK; vẫn kiểm tra thay vì tin mù. */
-    if (pcap_map_next(w->map, &off, &pkt) != PCAP_OK)
-        return;
+    /* Reader (hoặc split_file) đã đọc thành công record này và vùng map chỉ
+     * đọc, nên đọc lại luôn OK; vẫn kiểm tra thay vì tin mù. */
+    if (pcap_map_next(w->map, off, &pkt) != PCAP_OK)
+        return false;
     r = parse_packet(pkt.data, pkt.caplen, &info);
     if (stats_record(&w->stats, w->table, r, &info, pkt.orig_len, pkt.ts_ns) != 0)
         w->dropped_sessions++;
+    return true;
 }
 
 static void *worker_main(void *arg)
@@ -168,10 +180,56 @@ static void *worker_main(void *arg)
                 break;
         }
         for (i = 0; i < k; i++)
-            process(w, item_to_off(items[i]));
+        {
+            size_t off = item_to_off(items[i]);
+
+            process(w, &off);
+        }
     }
     w->cpu_sec = thread_cpu_sec();
     return NULL;
+}
+
+/* Shared-nothing: tự đọc đoạn [begin, end) của mình, không chờ ai. */
+static void *chunk_main(void *arg)
+{
+    struct worker *w = arg;
+    size_t off = w->begin;
+
+    while (off < w->end && process(w, &off))
+        ;
+    w->cpu_sec = thread_cpu_sec();
+    return NULL;
+}
+
+/* Chia vùng record thành n đoạn gần bằng nhau về byte, cắt đúng đầu record:
+ * bounds[i] .. bounds[i + 1] là đoạn i. Duyệt hết mọi record header nên ra
+ * luôn trạng thái cuối và điểm dừng (EOF hay lỗi) giống hệt reader. */
+static enum pcap_status split_file(const struct pcap_map *m, unsigned n,
+                                   size_t *bounds)
+{
+    size_t first = pcap_map_first(m);
+    size_t step = (pcap_map_size(m) - first) / n;
+    size_t off = first;
+    struct pcap_packet pkt;
+    enum pcap_status st;
+    unsigned k = 1;
+
+    bounds[0] = first;
+    for (;;)
+    {
+        size_t rec = off;
+
+        while (k < n && rec - first >= step * k)
+            bounds[k++] = rec;
+        st = pcap_map_next(m, &off, &pkt);
+        if (st != PCAP_OK)
+        {
+            while (k <= n)
+                bounds[k++] = rec;
+            return st;
+        }
+    }
 }
 
 /* Đẩy hết lô; ring đầy thì nhường CPU cho worker rồi đẩy phần còn lại. */
@@ -197,6 +255,7 @@ static void flush_batch(struct ring *rx, struct batch *b)
  *   3. pthread_create các worker.
  *   4. Luồng hiện tại làm reader: pcap_map_next -> peek TEID -> pick_worker
  *      -> thêm offset vào lô của worker đó, đủ lô thì flush_batch.
+ *      (shared-nothing: split_file TRƯỚC khi tạo worker, không có reader.)
  *   5. Flush mọi lô còn dở, set done; pthread_join mọi worker.
  *   6. Gộp stats vào res->total; chuyển quyền sở hữu các table sang res.
  *   7. Dọn mọi thứ còn lại (goto cleanup).
@@ -212,6 +271,8 @@ int pipeline_run(const struct pipeline_config *cfg, struct pipeline_result *res)
     unsigned n, i, started = 0;
     enum pcap_status st;
     size_t off, batch;
+    size_t bounds[PIPELINE_MAX_WORKERS + 1];
+    bool sn = cfg->shared_nothing;
     int rc = -1;
 
     memset(res, 0, sizeof *res);
@@ -236,10 +297,11 @@ int pipeline_run(const struct pipeline_config *cfg, struct pipeline_result *res)
         goto cleanup;
     for (i = 0; i < n; i++)
     {
-        /* ring_create tự từ chối capacity không phải lũy thừa 2. */
-        ws[i].rx = ring_create(cfg->ring_capacity);
+        /* ring_create tự từ chối capacity không phải lũy thừa 2.
+         * Shared-nothing không cần ring. */
+        ws[i].rx = sn ? NULL : ring_create(cfg->ring_capacity);
         ws[i].table = session_table_create(TABLE_INITIAL_CAPACITY);
-        if (ws[i].rx == NULL || ws[i].table == NULL)
+        if ((!sn && ws[i].rx == NULL) || ws[i].table == NULL)
             goto cleanup;
         ws[i].map = map;
         stats_init(&ws[i].stats);
@@ -247,12 +309,25 @@ int pipeline_run(const struct pipeline_config *cfg, struct pipeline_result *res)
     }
 
     clock_gettime(CLOCK_MONOTONIC, &t0);
+    if (sn)
+    {
+        res->read_status = split_file(map, n, bounds);
+        for (i = 0; i < n; i++)
+        {
+            ws[i].begin = bounds[i];
+            ws[i].end = bounds[i + 1];
+        }
+        clock_gettime(CLOCK_MONOTONIC, &tr);
+    }
     for (started = 0; started < n; started++)
     {
-        if (pthread_create(&ws[started].tid, NULL, worker_main, &ws[started]) != 0)
+        if (pthread_create(&ws[started].tid, NULL, sn ? chunk_main : worker_main,
+                           &ws[started]) != 0)
             goto stop;
     }
     rc = 0;
+    if (sn)
+        goto stop;
 
     off = pcap_map_first(map);
     for (;;)
@@ -269,14 +344,14 @@ int pipeline_run(const struct pipeline_config *cfg, struct pipeline_result *res)
         batches[w].items[batches[w].n++] = off_to_item(rec);
         if (batches[w].n == batch)
             flush_batch(ws[w].rx, &batches[w]);
-        res->per_worker_packets[w]++;
     }
     res->read_status = st;
     for (i = 0; i < n; i++)
         flush_batch(ws[i].rx, &batches[i]);
 
 stop:
-    clock_gettime(CLOCK_MONOTONIC, &tr);
+    if (!sn)
+        clock_gettime(CLOCK_MONOTONIC, &tr);
     atomic_store_explicit(&done, true, memory_order_release);
     for (i = 0; i < started; i++)
         pthread_join(ws[i].tid, NULL);
@@ -288,6 +363,7 @@ stop:
         {
             stats_merge(&res->total, &ws[i].stats);
             res->dropped_sessions += ws[i].dropped_sessions;
+            res->per_worker_packets[i] = ws[i].stats.packets;
             res->per_worker_cpu_sec[i] = ws[i].cpu_sec;
             res->tables[i] = ws[i].table;   /* chuyển quyền sở hữu sang res */
             ws[i].table = NULL;
