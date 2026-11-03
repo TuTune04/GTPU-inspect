@@ -88,6 +88,23 @@ thật. Các header đã có sẵn `extern "C"` nên include thẳng từ C++ đ
   ```
   Mỗi crash tìm được: thêm thành fixture trong `tools/gen_pcaps.py` trước khi sửa.
 
+### Tuần 3, v2: nâng cấp sau khi đo v1 (nhánh `week3_v2`)
+
+Nhận xét v1: [review-v1.md](review-v1.md). Kết quả và bài học:
+[review-v2.md](review-v2.md). Thử nghiệm bị bỏ: nhánh `exp/*`, số đo trong
+commit message.
+
+- [x] Đo trước: `perf`, `tools/bench.sh`, pipeline báo thời gian reader, CPU
+      và số lần ngủ của từng worker.
+- [x] mmap file (`pcap_map_*`), ring chỉ chở offset record, bỏ chép gói.
+  - Tự trả lời: khi nào mempool vẫn đáng dùng dù đã có mmap?
+- [x] `ring_push_bulk` / `ring_pop_bulk`, reader đẩy theo lô (`-b`).
+- [x] Shared-nothing (`-S`) + `session_merge`.
+  - Tự trả lời: vì sao bước chia file không song song được? Cần gì ở định
+    dạng đầu vào để bỏ được nó?
+- [x] Worker spin ngắn rồi ngủ trên condvar, không mất tín hiệu đánh thức.
+  - Tự trả lời: ngưỡng spin nên so với đại lượng nào?
+
 ## Dữ liệu test
 
 `tools/gen_pcaps.py` sinh `tests/data/*.pcap` kèm `*.expected` (kết quả mong
