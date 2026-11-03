@@ -138,3 +138,74 @@ TEST(Pcap, StatusStringsAreStable) {
   ASSERT_NE(s, nullptr);
   EXPECT_STREQ(s, "unknown");
 }
+
+// ---------------------------------------------------------------------------
+// Reader mmap (v2): phải ra đúng các gói và đúng lỗi như reader stream.
+// ---------------------------------------------------------------------------
+namespace {
+
+struct Packet {
+  uint64_t ts_ns;
+  uint32_t orig_len;
+  std::vector<uint8_t> data;
+  bool operator==(const Packet &o) const {
+    return ts_ns == o.ts_ns && orig_len == o.orig_len && data == o.data;
+  }
+};
+
+pcap_status read_stream(const std::string &path, std::vector<Packet> *out) {
+  pcap_reader *r = nullptr;
+  pcap_status st = pcap_open(path.c_str(), &r);
+  if (st != PCAP_OK) return st;
+  pcap_packet pkt;
+  while ((st = pcap_next(r, &pkt)) == PCAP_OK)
+    out->push_back({pkt.ts_ns, pkt.orig_len,
+                    std::vector<uint8_t>(pkt.data, pkt.data + pkt.caplen)});
+  pcap_close(r);
+  return st;
+}
+
+pcap_status read_map(const std::string &path, std::vector<Packet> *out) {
+  pcap_map *m = reinterpret_cast<pcap_map *>(0x1);
+  pcap_status st = pcap_map_open(path.c_str(), &m);
+  if (st != PCAP_OK) {
+    EXPECT_EQ(m, nullptr) << "open lỗi thì *out phải là NULL";
+    return st;
+  }
+  size_t off = pcap_map_first(m);
+  pcap_packet pkt;
+  while ((st = pcap_map_next(m, &off, &pkt)) == PCAP_OK)
+    out->push_back({pkt.ts_ns, pkt.orig_len,
+                    std::vector<uint8_t>(pkt.data, pkt.data + pkt.caplen)});
+  // Lỗi/EOF thì offset đứng yên: gọi lại ra đúng trạng thái đó.
+  EXPECT_EQ(pcap_map_next(m, &off, &pkt), st);
+  pcap_map_close(m);
+  return st;
+}
+
+}  // namespace
+
+TEST(PcapMap, MatchesStreamReaderOnEveryFixture) {
+  for (const char *name :
+       {"pcap_empty", "pcap_big_endian", "pcap_nanosec", "gtpu_basic",
+        "gtpu_optional_fields", "gtpu_5g_ext", "gtpu_signalling", "malformed",
+        "non_gtpu", "bad_pcap_magic", "bad_pcap_short_header",
+        "bad_pcap_linktype", "bad_pcap_truncated_record",
+        "bad_pcap_caplen_huge"}) {
+    SCOPED_TRACE(name);
+    const std::string path = data_path(std::string(name) + ".pcap");
+    std::vector<Packet> a, b;
+    EXPECT_EQ(read_map(path, &b), read_stream(path, &a));
+    EXPECT_TRUE(a == b);
+  }
+}
+
+TEST(PcapMap, OpenErrors) {
+  pcap_map *m = nullptr;
+  EXPECT_EQ(pcap_map_open(data_path("khong_ton_tai.pcap").c_str(), &m),
+            PCAP_ERR_IO);
+  EXPECT_EQ(m, nullptr);
+  EXPECT_EQ(pcap_map_open(GTPU_TEST_DATA_DIR, &m), PCAP_ERR_IO);  // thư mục
+  EXPECT_EQ(m, nullptr);
+  pcap_map_close(nullptr);
+}
