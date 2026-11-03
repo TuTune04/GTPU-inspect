@@ -27,6 +27,7 @@
 #ifndef GTPU_PCAP_H
 #define GTPU_PCAP_H
 
+#include <stddef.h> /* size_t */
 #include <stdint.h> /* uint8_t, uint32_t... (C11). <cstdint> là của C++ */
 
 #ifdef __cplusplus
@@ -112,6 +113,30 @@ extern "C"
      *   "truncated_record", "caplen_too_large".
      * Giá trị ngoài enum -> "unknown". Không bao giờ trả NULL. */
     const char *pcap_status_str(enum pcap_status s);
+
+    /*
+     * Reader mmap (v2): ánh xạ cả file vào bộ nhớ, không chép gói. Duyệt
+     * bằng một offset do người gọi giữ, nên nhiều luồng đọc cùng một map
+     * được (mỗi luồng một offset). pkt->data trỏ thẳng vào vùng map, hợp lệ
+     * tới pcap_map_close.
+     *
+     * Cùng kiểm tra và cùng mã lỗi với pcap_open/pcap_next trên cùng file.
+     * Giới hạn: nếu file bị cắt ngắn trong khi đang map, đọc vùng mất sẽ
+     * nhận SIGBUS — chỉ dùng cho file không bị ghi đồng thời.
+     */
+    struct pcap_map;
+
+    enum pcap_status pcap_map_open(const char *path, struct pcap_map **out);
+    void pcap_map_close(struct pcap_map *m);
+
+    /* Offset của record đầu tiên và tổng kích thước file. */
+    size_t pcap_map_first(const struct pcap_map *m);
+    size_t pcap_map_size(const struct pcap_map *m);
+
+    /* Đọc record tại *off. PCAP_OK: điền *pkt và đưa *off tới record kế.
+     * *off == kích thước file: PCAP_EOF. Khác: lỗi, *off giữ nguyên. */
+    enum pcap_status pcap_map_next(const struct pcap_map *m, size_t *off,
+                                   struct pcap_packet *pkt);
 
 #ifdef __cplusplus
 }

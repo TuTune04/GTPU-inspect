@@ -84,6 +84,24 @@ void stats_merge(struct stats *dst, const struct stats *src)
         dst->by_qfi[i] += src->by_qfi[i];
 }
 
+/* Luồng có cùng 5-tuple với k, hoặc NULL. */
+static struct inner_flow *find_flow(struct session *s,
+                                    const struct inner_flow *k)
+{
+    size_t i;
+
+    for (i = 0; i < s->n_flows; i++)
+    {
+        struct inner_flow *c = &s->flows[i];
+
+        if (c->src_ip == k->src_ip && c->dst_ip == k->dst_ip &&
+            c->sport == k->sport && c->dport == k->dport &&
+            c->proto == k->proto)
+            return c;
+    }
+    return NULL;
+}
+
 /*
  * session_account
  *   1. packets++, bytes += wire_len; first_ts_ns (nếu packets trước đó = 0),
@@ -96,8 +114,7 @@ void stats_merge(struct stats *dst, const struct stats *src)
 void session_account(struct session *s, const struct pkt_info *info,
                      uint32_t wire_len, uint64_t ts_ns)
 {
-    struct inner_flow *f = NULL;
-    size_t i;
+    struct inner_flow *f;
 
     if (s->packets == 0)
         s->first_ts_ns = ts_ns;
@@ -111,35 +128,80 @@ void session_account(struct session *s, const struct pkt_info *info,
     if (!info->has_inner)
         return;
 
-    for (i = 0; i < s->n_flows; i++)
     {
-        struct inner_flow *c = &s->flows[i];
+        struct inner_flow k = {
+            .src_ip = info->inner_src_ip,
+            .dst_ip = info->inner_dst_ip,
+            .sport = info->inner_sport,
+            .dport = info->inner_dport,
+            .proto = info->inner_proto,
+        };
 
-        if (c->src_ip == info->inner_src_ip && c->dst_ip == info->inner_dst_ip &&
-            c->sport == info->inner_sport && c->dport == info->inner_dport &&
-            c->proto == info->inner_proto)
+        f = find_flow(s, &k);
+        if (f == NULL)
         {
-            f = c;
-            break;
+            if (s->n_flows >= SESSION_MAX_FLOWS)
+            {
+                s->flows_overflow++;
+                return;
+            }
+            f = &s->flows[s->n_flows++];
+            *f = k;   /* counter = 0 nhờ designated initializer */
         }
-    }
-    if (f == NULL)
-    {
-        if (s->n_flows >= SESSION_MAX_FLOWS)
-        {
-            s->flows_overflow++;
-            return;
-        }
-        f = &s->flows[s->n_flows++];
-        memset(f, 0, sizeof *f);
-        f->src_ip = info->inner_src_ip;
-        f->dst_ip = info->inner_dst_ip;
-        f->sport = info->inner_sport;
-        f->dport = info->inner_dport;
-        f->proto = info->inner_proto;
     }
     f->packets++;
     f->bytes += wire_len;
+}
+
+/*
+ * session_merge
+ *   Gộp theo đúng thứ tự thời gian thì kết quả bằng chạy tuần tự: dst giữ
+ *   first_ts, src cho last_ts và last_qfi (nếu src đã thấy QFI). Luồng của
+ *   src theo thứ tự xuất hiện được thêm vào sau luồng của dst, hết chỗ thì
+ *   gói của luồng đó vào flows_overflow — giống hệt session_account làm khi
+ *   gặp các gói đó lần lượt.
+ *   Chỗ duy nhất không tái tạo được: gói đã overflow ở src có thể thuộc một
+ *   luồng dst đang theo dõi (session_account tuần tự sẽ đếm vào luồng đó).
+ */
+bool session_merge(struct session *dst, const struct session *src)
+{
+    bool exact = src->flows_overflow == 0 || dst->n_flows == 0;
+    size_t i;
+
+    if (src->packets == 0)
+        return true;
+    if (dst->packets == 0)
+    {
+        *dst = *src;
+        return true;
+    }
+    dst->packets += src->packets;
+    dst->bytes += src->bytes;
+    dst->last_ts_ns = src->last_ts_ns;
+    if (src->last_qfi != 0)
+        dst->last_qfi = src->last_qfi;
+
+    for (i = 0; i < src->n_flows; i++)
+    {
+        const struct inner_flow *f = &src->flows[i];
+        struct inner_flow *d = find_flow(dst, f);
+
+        if (d != NULL)
+        {
+            d->packets += f->packets;
+            d->bytes += f->bytes;
+        }
+        else if (dst->n_flows < SESSION_MAX_FLOWS)
+        {
+            dst->flows[dst->n_flows++] = *f;
+        }
+        else
+        {
+            dst->flows_overflow += f->packets;
+        }
+    }
+    dst->flows_overflow += src->flows_overflow;
+    return exact;
 }
 
 /*
