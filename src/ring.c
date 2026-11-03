@@ -64,43 +64,106 @@
 #include <stddef.h>
 #include <stdlib.h>    /* aligned_alloc, calloc, free */
 
+/* Cache line 64 byte trên x86-64 và phần lớn ARM64. head, tail và phần
+ * chỉ-đọc (mask, slots) mỗi thứ một line: producer ghi head, consumer ghi
+ * tail, hai core không tranh nhau cùng một line. */
+#define RING_CACHE_LINE 64
+
+/* tail_cache / head_cache: bản sao cục bộ chỉ số của bên kia, nằm chung line
+ * với chỉ số của chính mình. Chỉ load chỉ số thật (kéo cache line từ core
+ * kia về) khi bản sao báo đầy/rỗng, thay vì mỗi gói một lần. */
+struct ring {
+    _Alignas(RING_CACHE_LINE) _Atomic size_t head;  /* chỉ producer ghi */
+    size_t tail_cache;                              /* producer riêng */
+    _Alignas(RING_CACHE_LINE) _Atomic size_t tail;  /* chỉ consumer ghi */
+    size_t head_cache;                              /* consumer riêng */
+    _Alignas(RING_CACHE_LINE) size_t mask;          /* capacity - 1 */
+    void **slots;
+};
+
 /* ring_create: kiểm tra capacity >= 2 và (capacity & (capacity - 1)) == 0. */
 struct ring *ring_create(size_t capacity)
 {
-    /* TODO: xóa stub và viết code của bạn */
-    (void)capacity;
-    return NULL;
+    struct ring *r;
+
+    if (capacity < 2u || (capacity & (capacity - 1u)) != 0)
+        return NULL;
+
+    /* malloc chỉ bảo đảm alignof(max_align_t); struct có _Alignas(64) phải
+     * cấp bằng aligned_alloc. sizeof đã là bội của 64 vì alignment của
+     * struct là 64, đúng điều kiện size của aligned_alloc. */
+    r = aligned_alloc(alignof(struct ring), sizeof *r);
+    if (r == NULL)
+        return NULL;
+    r->slots = calloc(capacity, sizeof *r->slots);
+    if (r->slots == NULL)
+    {
+        free(r);
+        return NULL;
+    }
+    atomic_init(&r->head, 0);
+    atomic_init(&r->tail, 0);
+    r->tail_cache = 0;
+    r->head_cache = 0;
+    r->mask = capacity - 1u;
+    return r;
 }
 
 /* ring_destroy: NULL-safe; free slots và struct. Không free các item. */
 void ring_destroy(struct ring *r)
 {
-    /* TODO */
-    (void)r;
+    if (r == NULL)
+        return;
+    free(r->slots);
+    free(r);
 }
 
 /* ring_push: xem pseudo-code ở đầu file. */
 bool ring_push(struct ring *r, void *item)
 {
-    /* TODO */
-    (void)r;
-    (void)item;
-    return false;
+    size_t h = atomic_load_explicit(&r->head, memory_order_relaxed);
+
+    if (h - r->tail_cache > r->mask)
+    {
+        /* acquire: cặp với release trong ring_pop. Consumer đọc xong slot
+         * rồi mới công bố tail mới, nên ghi đè slot đó ở đây là an toàn.
+         * tail_cache cũ hơn tail thật nên chỉ có thể báo đầy sai, không
+         * bao giờ cho ghi đè slot chưa đọc. */
+        r->tail_cache = atomic_load_explicit(&r->tail, memory_order_acquire);
+        if (h - r->tail_cache > r->mask)
+            return false;
+    }
+    r->slots[h & r->mask] = item;
+    /* release: ghi slot phía trên phải được thấy trước head mới. */
+    atomic_store_explicit(&r->head, h + 1u, memory_order_release);
+    return true;
 }
 
 /* ring_pop: xem pseudo-code ở đầu file. */
 bool ring_pop(struct ring *r, void **item)
 {
-    /* TODO */
-    (void)r;
-    (void)item;
-    return false;
+    size_t t = atomic_load_explicit(&r->tail, memory_order_relaxed);
+
+    if (t == r->head_cache)
+    {
+        /* acquire cặp với release của producer; head_cache chỉ lưu giá trị
+         * đã acquire nên slot trước nó chắc chắn đã được ghi xong. */
+        r->head_cache = atomic_load_explicit(&r->head, memory_order_acquire);
+        if (t == r->head_cache)
+            return false;
+    }
+    *item = r->slots[t & r->mask];
+    atomic_store_explicit(&r->tail, t + 1u, memory_order_release);
+    return true;
 }
 
 /* ring_count: head - tail, cả hai load relaxed. */
 size_t ring_count(const struct ring *r)
 {
-    /* TODO */
-    (void)r;
-    return 0;
+    /* Load tail trước: tail chỉ tăng nên tail cũ <= head đọc sau, hiệu
+     * không bao giờ "âm". Đọc head trước có thể ra số khổng lồ. */
+    size_t t = atomic_load_explicit(&r->tail, memory_order_relaxed);
+    size_t h = atomic_load_explicit(&r->head, memory_order_relaxed);
+
+    return h - t;
 }

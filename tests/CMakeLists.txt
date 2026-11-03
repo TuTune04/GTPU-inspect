@@ -21,7 +21,8 @@ add_executable(gtpu_tests
   test_session_table.cpp
   test_stats.cpp
   test_ring.cpp
-  test_mempool.cpp)
+  test_mempool.cpp
+  test_pipeline.cpp)
 target_compile_options(gtpu_tests PRIVATE ${GTPU_CXX_WARNINGS})
 target_compile_definitions(gtpu_tests PRIVATE
   GTPU_TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/tests/data")

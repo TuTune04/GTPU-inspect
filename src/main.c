@@ -6,6 +6,7 @@
  *     -v          in mỗi gói một dòng (tuần 1)
  *     -n TOP      số phiên trong bảng top N (tuần 2, mặc định 10)
  *     -w WORKERS  số luồng worker (tuần 3; 0 = chạy tuần tự, không thread)
+ *     -m          với -w: malloc/free mỗi gói thay cho mempool (để so sánh)
  *
  * CTest tự chạy chương trình trên mọi file .pcap trong tests/data/ (test cli.*):
  * chỉ fail khi crash hoặc sanitizer báo lỗi.
@@ -22,7 +23,7 @@
 #include "parser.h"
 #include "session_table.h"
 #include "stats.h"
-/* #include "pipeline.h"        tuần 3 */
+#include "pipeline.h"
 
 /*
  * [TUẦN 1] Chạy tuần tự
@@ -62,7 +63,8 @@
  */
 static void usage(const char *prog)
 {
-    fprintf(stderr, "usage: %s [-v] [-n TOP] file.pcap\n", prog);
+    fprintf(stderr, "usage: %s [-v] [-n TOP] [-w WORKERS [-m]] file.pcap\n",
+            prog);
 }
 
 /* IPv4 host order -> "a.b.c.d". buf tối thiểu 16 byte. */
@@ -93,6 +95,91 @@ static void print_packet(uint64_t idx, enum parse_result res,
     printf("\n");
 }
 
+/* Số thập phân không dấu, cả chuỗi phải là số. */
+static bool parse_ulong(const char *s, unsigned long *out)
+{
+    char *end;
+
+    *out = strtoul(s, &end, 10);
+    return *s != '\0' && *end == '\0';
+}
+
+struct merge_ctx {
+    struct session_table *dst;
+    uint64_t              failed;
+};
+
+/* Dispatch theo TEID nên các bảng worker không chung key nào: chép nguyên
+ * phiên sang bảng gộp là đủ. Gộp vào một bảng để stats_print in top N giống
+ * hệt chế độ tuần tự. */
+static void merge_session(const struct session *s, void *arg)
+{
+    struct merge_ctx *ctx = arg;
+    struct session *d = session_table_upsert(ctx->dst, &s->key);
+
+    if (d == NULL || d->packets != 0)
+        ctx->failed++;
+    else
+        *d = *s;
+}
+
+/* [TUẦN 3] -w WORKERS: chạy pipeline thay cho vòng lặp tuần tự. */
+static int run_pipeline(const char *path, unsigned workers, bool use_mempool,
+                        size_t top_n)
+{
+    struct pipeline_config cfg = {
+        .path = path,
+        .n_workers = workers,
+        .ring_capacity = 1024,
+        .pool_size = 4096,
+        .use_mempool = use_mempool,
+    };
+    struct pipeline_result res;
+    struct merge_ctx ctx = {NULL, 0};
+    unsigned i;
+
+    if (pipeline_run(&cfg, &res) != 0)
+    {
+        if (res.read_status != PCAP_OK)
+            fprintf(stderr, "%s: %s\n", path, pcap_status_str(res.read_status));
+        else
+            fprintf(stderr, "%s: không chạy được pipeline\n", path);
+        return EXIT_FAILURE;
+    }
+    if (res.read_status != PCAP_EOF)
+        fprintf(stderr, "%s: %s (sau %" PRIu64 " gói)\n", path,
+                pcap_status_str(res.read_status), res.total.packets);
+
+    ctx.dst = session_table_create(1024);
+    if (ctx.dst == NULL)
+    {
+        fprintf(stderr, "không đủ bộ nhớ cho bảng phiên\n");
+        pipeline_result_free(&res);
+        return EXIT_FAILURE;
+    }
+    for (i = 0; i < res.n_workers; i++)
+        session_table_foreach(res.tables[i], merge_session, &ctx);
+
+    stats_print(&res.total, ctx.dst, top_n, stdout);
+    if (res.dropped_sessions > 0 || ctx.failed > 0)
+        fprintf(stderr, "không thêm được phiên cho %" PRIu64 " gói, %" PRIu64
+                " phiên khi gộp\n", res.dropped_sessions, ctx.failed);
+
+    /* Số đo cho benchmark, ra stderr để stdout giống hệt chế độ tuần tự. */
+    fprintf(stderr, "pipeline: %u worker, mempool %s, %" PRIu64 " gói trong %.3f s"
+            " (%.2f Mpps)\n", res.n_workers, use_mempool ? "có" : "không",
+            res.total.packets, res.elapsed_sec,
+            res.elapsed_sec > 0 ? (double)res.total.packets / res.elapsed_sec / 1e6
+                                : 0.0);
+    for (i = 0; i < res.n_workers; i++)
+        fprintf(stderr, "  worker %u: %" PRIu64 " gói\n", i,
+                res.per_worker_packets[i]);
+
+    session_table_destroy(ctx.dst);
+    pipeline_result_free(&res);
+    return res.read_status == PCAP_EOF ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
 int main(int argc, char **argv)
 {
     struct stats stats;
@@ -100,30 +187,34 @@ int main(int argc, char **argv)
     uint64_t idx = 0;
     uint64_t dropped_sessions = 0;
     size_t top_n = 10;
+    unsigned workers = 0;
     bool verbose = false;
+    bool use_mempool = true;
     struct pcap_reader *reader;
     struct pcap_packet pkt;
     struct pkt_info info;
     enum pcap_status st;
+    unsigned long v;
     int opt;
 
-    while ((opt = getopt(argc, argv, "vn:")) != -1)
+    while ((opt = getopt(argc, argv, "vn:w:m")) != -1)
     {
         if (opt == 'v')
         {
             verbose = true;
         }
-        else if (opt == 'n')
+        else if (opt == 'n' && parse_ulong(optarg, &v))
         {
-            char *end;
-            unsigned long v = strtoul(optarg, &end, 10);
-
-            if (*optarg == '\0' || *end != '\0')
-            {
-                usage(argv[0]);
-                return 2;
-            }
             top_n = (size_t)v;
+        }
+        else if (opt == 'w' && parse_ulong(optarg, &v) &&
+                 v <= PIPELINE_MAX_WORKERS)
+        {
+            workers = (unsigned)v;
+        }
+        else if (opt == 'm')
+        {
+            use_mempool = false;
         }
         else
         {
@@ -131,11 +222,14 @@ int main(int argc, char **argv)
             return 2;
         }
     }
-    if (argc - optind != 1)
+    /* -v in theo thứ tự gói, mà worker xử lý song song: không đi cùng -w. */
+    if (argc - optind != 1 || (verbose && workers > 0))
     {
         usage(argv[0]);
         return 2;
     }
+    if (workers > 0)
+        return run_pipeline(argv[optind], workers, use_mempool, top_n);
 
     st = pcap_open(argv[optind], &reader);
     if (st != PCAP_OK)

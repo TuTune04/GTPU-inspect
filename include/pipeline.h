@@ -15,6 +15,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "pcap.h"
 #include "session_table.h"
 #include "stats.h"
 
@@ -37,10 +38,14 @@ struct pipeline_result {
     unsigned               n_workers;
     struct session_table  *tables[PIPELINE_MAX_WORKERS]; /* mỗi worker một bảng */
     uint64_t               per_worker_packets[PIPELINE_MAX_WORKERS];
+    uint64_t               dropped_sessions;  /* stats_record trả -1 */
+    enum pcap_status       read_status;       /* PCAP_EOF nếu đọc hết file */
     double                 elapsed_sec;
 };
 
-/* 0 nếu thành công. Khi thành công, gọi pipeline_result_free sau khi dùng. */
+/* 0 nếu thành công (kể cả khi file hỏng giữa chừng: xem read_status, stats
+ * vẫn chứa các gói đã đọc). pcap_open lỗi -> -1 và read_status là lỗi đó.
+ * Khi thành công, gọi pipeline_result_free sau khi dùng. */
 int  pipeline_run(const struct pipeline_config *cfg, struct pipeline_result *res);
 void pipeline_result_free(struct pipeline_result *res);
 

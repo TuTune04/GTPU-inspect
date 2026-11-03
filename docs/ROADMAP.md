@@ -66,18 +66,20 @@ thật. Các header đã có sẵn `extern "C"` nên include thẳng từ C++ đ
   - Tự trả lời: hàm hash nào? linear hay quadratic probing? xóa phần tử thế
     nào (tombstone)? load factor bao nhiêu thì resize?
 - [x] `src/stats.c`: đếm theo message type, theo lý do lỗi, top N phiên.
-- [ ] Valgrind sạch: CI job `valgrind` xanh.
+- [x] Valgrind sạch: CI job `valgrind` xanh.
 
 ## Tuần 3: đa luồng, mempool, benchmark, fuzz
 
-- [ ] `src/ring.c`: SPSC ring với `<stdatomic.h>`. Test: `tests/test_ring.cpp`,
+- [x] `src/ring.c`: SPSC ring với `<stdatomic.h>`. Test: `tests/test_ring.cpp`,
       chạy thêm với ThreadSanitizer.
   - Tự trả lời: vì sao producer chỉ ghi `head`, consumer chỉ ghi `tail`?
     Chỗ nào cần `memory_order_release`, chỗ nào `acquire`? False sharing là gì
     và vì sao đặt `head`/`tail` trên hai cache line khác nhau?
-- [ ] `src/mempool.c`: free list kích thước cố định. Test: `tests/test_mempool.cpp`.
-- [ ] Reader thread + N worker, dispatch `hash(TEID) % N`.
-- [ ] Benchmark theo `bench/README.md`, ghi số liệu thật vào README.
+- [x] `src/mempool.c`: free list kích thước cố định. Test: `tests/test_mempool.cpp`.
+- [x] Reader thread + N worker, dispatch `hash(TEID) % N`.
+      Test: `tests/test_pipeline.cpp` so với chạy tuần tự.
+- [x] Benchmark theo `bench/README.md`, ghi số liệu thật vào README.
+      Thử nghiệm bị bỏ nằm ở nhánh `exp/*`, số đo trong commit message.
 - [ ] Nối `fuzz/fuzz_parser.c` với parser, fuzz nhiều giờ:
   ```sh
   CC=clang CXX=clang++ cmake -B build-fuzz -DGTPU_BUILD_FUZZ=ON
