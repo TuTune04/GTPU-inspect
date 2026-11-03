@@ -46,6 +46,8 @@ struct pipeline_result {
     double                 reader_sec;        /* vòng đọc của reader; shared-
                                                  nothing: thời gian chia file */
     double                 per_worker_cpu_sec[PIPELINE_MAX_WORKERS];
+    uint64_t               per_worker_sleeps[PIPELINE_MAX_WORKERS]; /* số lần
+                                                 ngủ trên condvar */
 };
 
 /* 0 nếu thành công (kể cả khi file hỏng giữa chừng: xem read_status, stats

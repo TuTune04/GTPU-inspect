@@ -175,8 +175,9 @@ static int run_pipeline(const struct pipeline_config *cfg, size_t top_n)
     fprintf(stderr, "  %s: %.3f s\n",
             cfg->shared_nothing ? "chia file" : "reader", res.reader_sec);
     for (i = 0; i < res.n_workers; i++)
-        fprintf(stderr, "  worker %u: %" PRIu64 " gói, cpu %.3f s\n", i,
-                res.per_worker_packets[i], res.per_worker_cpu_sec[i]);
+        fprintf(stderr, "  worker %u: %" PRIu64 " gói, cpu %.3f s, ngủ %" PRIu64
+                " lần\n", i, res.per_worker_packets[i], res.per_worker_cpu_sec[i],
+                res.per_worker_sleeps[i]);
 
     session_table_destroy(ctx.dst);
     pipeline_result_free(&res);

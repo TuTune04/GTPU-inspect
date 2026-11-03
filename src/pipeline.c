@@ -44,7 +44,17 @@
  *   session_merge theo thứ tự đoạn, và mất thứ tự xử lý trong một phiên.
  *
  * RING ĐẦY / RỖNG
- *   Ring đầy: reader sched_yield() rồi thử lại. Ring rỗng: worker tương tự.
+ *   Ring đầy: reader sched_yield() rồi thử lại (reader là nút thắt nên hiếm).
+ *   v2: ring rỗng thì worker spin vài vòng với lệnh pause rồi ngủ trên condvar
+ *   (wait_for_work), reader đánh thức sau khi flush lô. v1 sched_yield liên
+ *   tục: với 4 worker tốn 2.7 s sys để chờ một reader chậm.
+ *
+ *   Không mất tín hiệu đánh thức (mẫu Dekker): worker ghi sleeping = true
+ *   RỒI mới xem ring; reader push RỒI mới xem sleeping. Có fence seq_cst ở
+ *   giữa ở cả hai phía nên ít nhất một bên thấy việc của bên kia: hoặc worker
+ *   thấy ring có hàng và không ngủ, hoặc reader thấy sleeping và signal. Worker
+ *   giữ mutex từ lúc xem ring tới khi cond_wait nhả nó, reader signal dưới
+ *   cùng mutex, nên signal không thể lọt vào khe giữa "xem" và "ngủ".
  */
 #include "pipeline.h"
 
@@ -56,6 +66,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>      /* clock_gettime, CLOCK_MONOTONIC */
+#if defined(__x86_64__) || defined(__i386__)
+#include <immintrin.h> /* _mm_pause */
+#endif
 
 #include "bytes.h"     /* rd_be32 */
 #include "parser.h"
@@ -64,6 +77,12 @@
 
 #define TABLE_INITIAL_CAPACITY 1024u
 #define WORKER_POP_MAX 64u
+/* Ring rỗng: spin bấy nhiêu vòng (pause) rồi ngủ. Phải ngắn hơn khoảng cách
+ * giữa hai lô (~9 us với 4 worker, lô 32 trên big.pcap) thì mới tiết kiệm
+ * được CPU: đo với 256 vòng spin + 64 lần yield, worker gần như không bao giờ
+ * ngủ (cpu 4 worker 0.81 s); 16 vòng: 0.51 s; ngủ ngay: 0.32 s — thông lượng
+ * như nhau trong vùng nhiễu. Tầng sched_yield ở giữa không giúp gì nên bỏ. */
+#define IDLE_SPINS 16u
 /* TEID nằm ở byte 4-7 của header GTP-U. */
 #define GTPU_OFF_TEID 4u
 
@@ -77,6 +96,10 @@ struct worker {
     double                 cpu_sec;   /* CPU của riêng luồng này */
     const _Atomic bool    *done;
     size_t                 begin, end; /* shared-nothing: đoạn [begin, end) */
+    pthread_mutex_t        lock;       /* chỉ dùng khi worker ngủ / đánh thức */
+    pthread_cond_t         wake;
+    _Atomic bool           sleeping;
+    uint64_t               sleeps;
 };
 
 /* Lô offset reader đang gom cho một worker. Chỉ reader chạm vào. */
@@ -140,6 +163,52 @@ static unsigned pick_worker(uint32_t teid, unsigned n)
     return (unsigned)(((uint64_t)h * n) >> 32);
 }
 
+/* Gợi ý cho CPU "đang spin": nhường tài nguyên cho hyperthread kia và
+ * không đầu cơ load liên tục vào cache line của ring. */
+static void cpu_relax(void)
+{
+#if defined(__x86_64__) || defined(__i386__)
+    _mm_pause();
+#endif
+}
+
+/* Ring rỗng: spin một lúc rồi ngủ. *idle đếm số lần liên tiếp không lấy
+ * được gì, worker reset về 0 khi có việc. */
+static void wait_for_work(struct worker *w, unsigned *idle)
+{
+    if (*idle < IDLE_SPINS)
+    {
+        (*idle)++;
+        cpu_relax();
+        return;
+    }
+    pthread_mutex_lock(&w->lock);
+    atomic_store_explicit(&w->sleeping, true, memory_order_relaxed);
+    atomic_thread_fence(memory_order_seq_cst);   /* cặp với wake_worker */
+    if (ring_count(w->rx) == 0 &&
+        !atomic_load_explicit(w->done, memory_order_acquire))
+        w->sleeps++;
+    while (ring_count(w->rx) == 0 &&
+           !atomic_load_explicit(w->done, memory_order_acquire))
+        pthread_cond_wait(&w->wake, &w->lock);
+    atomic_store_explicit(&w->sleeping, false, memory_order_relaxed);
+    pthread_mutex_unlock(&w->lock);
+    *idle = 0;
+}
+
+/* Reader gọi sau khi push. Đa số lần worker không ngủ: chỉ tốn một fence và
+ * một load, không đụng mutex. */
+static void wake_worker(struct worker *w)
+{
+    atomic_thread_fence(memory_order_seq_cst);   /* cặp với wait_for_work */
+    if (atomic_load_explicit(&w->sleeping, memory_order_relaxed))
+    {
+        pthread_mutex_lock(&w->lock);
+        pthread_cond_signal(&w->wake);
+        pthread_mutex_unlock(&w->lock);
+    }
+}
+
 /* Xử lý record tại *off và đưa *off tới record kế. */
 static bool process(struct worker *w, size_t *off)
 {
@@ -161,6 +230,7 @@ static void *worker_main(void *arg)
 {
     struct worker *w = arg;
     void *items[WORKER_POP_MAX];
+    unsigned idle = 0;
     size_t k, i;
 
     for (;;)
@@ -172,13 +242,14 @@ static void *worker_main(void *arg)
              * pop lại một lần nữa mới chắc ring đã thật sự rỗng. */
             if (!atomic_load_explicit(w->done, memory_order_acquire))
             {
-                sched_yield();
+                wait_for_work(w, &idle);
                 continue;
             }
             k = ring_pop_bulk(w->rx, items, WORKER_POP_MAX);
             if (k == 0)
                 break;
         }
+        idle = 0;
         for (i = 0; i < k; i++)
         {
             size_t off = item_to_off(items[i]);
@@ -233,19 +304,20 @@ static enum pcap_status split_file(const struct pcap_map *m, unsigned n,
 }
 
 /* Đẩy hết lô; ring đầy thì nhường CPU cho worker rồi đẩy phần còn lại. */
-static void flush_batch(struct ring *rx, struct batch *b)
+static void flush_batch(struct worker *w, struct batch *b)
 {
     size_t done = 0;
 
     while (done < b->n)
     {
-        size_t k = ring_push_bulk(rx, b->items + done, b->n - done);
+        size_t k = ring_push_bulk(w->rx, b->items + done, b->n - done);
 
         if (k == 0)
             sched_yield();
         done += k;
     }
     b->n = 0;
+    wake_worker(w);
 }
 
 /*
@@ -268,7 +340,7 @@ int pipeline_run(const struct pipeline_config *cfg, struct pipeline_result *res)
     struct pcap_packet pkt;
     struct timespec t0, tr, t1;
     _Atomic bool done;
-    unsigned n, i, started = 0;
+    unsigned n, i, started = 0, n_sync = 0;
     enum pcap_status st;
     size_t off, batch;
     size_t bounds[PIPELINE_MAX_WORKERS + 1];
@@ -297,6 +369,15 @@ int pipeline_run(const struct pipeline_config *cfg, struct pipeline_result *res)
         goto cleanup;
     for (i = 0; i < n; i++)
     {
+        if (pthread_mutex_init(&ws[i].lock, NULL) != 0)
+            goto cleanup;
+        if (pthread_cond_init(&ws[i].wake, NULL) != 0)
+        {
+            pthread_mutex_destroy(&ws[i].lock);
+            goto cleanup;
+        }
+        n_sync++;
+        atomic_init(&ws[i].sleeping, false);
         /* ring_create tự từ chối capacity không phải lũy thừa 2.
          * Shared-nothing không cần ring. */
         ws[i].rx = sn ? NULL : ring_create(cfg->ring_capacity);
@@ -343,16 +424,25 @@ int pipeline_run(const struct pipeline_config *cfg, struct pipeline_result *res)
             w = pick_worker(teid, n);
         batches[w].items[batches[w].n++] = off_to_item(rec);
         if (batches[w].n == batch)
-            flush_batch(ws[w].rx, &batches[w]);
+            flush_batch(&ws[w], &batches[w]);
     }
     res->read_status = st;
     for (i = 0; i < n; i++)
-        flush_batch(ws[i].rx, &batches[i]);
+        flush_batch(&ws[i], &batches[i]);
 
 stop:
     if (!sn)
         clock_gettime(CLOCK_MONOTONIC, &tr);
     atomic_store_explicit(&done, true, memory_order_release);
+    /* Đánh thức mọi worker đang ngủ để chúng thấy done. Lấy mutex nên worker
+     * hoặc đã cond_wait (nhận broadcast), hoặc chưa xem điều kiện (sẽ thấy
+     * done); không có khe ở giữa. */
+    for (i = 0; i < started; i++)
+    {
+        pthread_mutex_lock(&ws[i].lock);
+        pthread_cond_broadcast(&ws[i].wake);
+        pthread_mutex_unlock(&ws[i].lock);
+    }
     for (i = 0; i < started; i++)
         pthread_join(ws[i].tid, NULL);
     clock_gettime(CLOCK_MONOTONIC, &t1);
@@ -365,6 +455,7 @@ stop:
             res->dropped_sessions += ws[i].dropped_sessions;
             res->per_worker_packets[i] = ws[i].stats.packets;
             res->per_worker_cpu_sec[i] = ws[i].cpu_sec;
+            res->per_worker_sleeps[i] = ws[i].sleeps;
             res->tables[i] = ws[i].table;   /* chuyển quyền sở hữu sang res */
             ws[i].table = NULL;
         }
@@ -380,6 +471,11 @@ cleanup:
         {
             ring_destroy(ws[i].rx);
             session_table_destroy(ws[i].table);
+        }
+        for (i = 0; i < n_sync; i++)
+        {
+            pthread_cond_destroy(&ws[i].wake);
+            pthread_mutex_destroy(&ws[i].lock);
         }
     }
     free(ws);

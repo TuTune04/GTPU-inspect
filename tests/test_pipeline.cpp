@@ -67,9 +67,10 @@ void check_session(const session *s, void *arg) {
     l->mismatches++;
 }
 
-void expect_same_as_sequential(const std::string &name, unsigned workers,
-                               size_t ring_capacity, size_t batch = 1,
-                               bool shared_nothing = false) {
+// Trả tổng số lần các worker ngủ trên condvar.
+uint64_t expect_same_as_sequential(const std::string &name, unsigned workers,
+                                   size_t ring_capacity, size_t batch = 1,
+                                   bool shared_nothing = false) {
   SCOPED_TRACE(name + " workers=" + std::to_string(workers) +
                " ring=" + std::to_string(ring_capacity) +
                " batch=" + std::to_string(batch) +
@@ -80,16 +81,20 @@ void expect_same_as_sequential(const std::string &name, unsigned workers,
                          shared_nothing};
   pipeline_result res;
 
-  ASSERT_EQ(pipeline_run(&cfg, &res), 0);
+  if (pipeline_run(&cfg, &res) != 0) {
+    ADD_FAILURE() << "pipeline_run lỗi";
+    return 0;
+  }
   EXPECT_EQ(res.read_status, seq.final_status);
-  ASSERT_EQ(res.n_workers, workers);
+  EXPECT_EQ(res.n_workers, workers);
   EXPECT_EQ(std::memcmp(&res.total, &seq.st, sizeof seq.st), 0);
 
-  uint64_t dispatched = 0;
+  uint64_t dispatched = 0, sleeps = 0;
   size_t sessions = 0;
   Merge merge{session_table_create(16)};
   for (unsigned i = 0; i < workers; i++) {
     dispatched += res.per_worker_packets[i];
+    sleeps += res.per_worker_sleeps[i];
     sessions += session_table_size(res.tables[i]);
     session_table_foreach(res.tables[i], merge_into, &merge);
   }
@@ -105,6 +110,7 @@ void expect_same_as_sequential(const std::string &name, unsigned workers,
   EXPECT_EQ(lookup.mismatches, 0);
   session_table_destroy(merge.dst);
   pipeline_result_free(&res);
+  return sleeps;
 }
 
 }  // namespace
@@ -147,6 +153,19 @@ TEST(Pipeline, SharedNothingMatchesSequential) {
 TEST(Pipeline, TruncatedFileMatchesSequential) {
   for (unsigned workers : {1u, 3u})
     expect_same_as_sequential("bad_pcap_truncated_record", workers, 1024);
+}
+
+TEST(Pipeline, RepeatedRunsNeverHang) {
+  // Worker ngủ trên condvar khi ring rỗng lâu; một lần mất tín hiệu đánh
+  // thức là một lần treo. File nhỏ + nhiều worker + lô 1: reader liên tục
+  // đẩy vào đúng lúc worker vừa quyết định ngủ. Treo -> ctest timeout.
+  uint64_t sleeps = 0;
+  for (int run = 0; run < 300; run++)
+    sleeps += expect_same_as_sequential(run % 2 ? "gtpu_basic" : "malformed",
+                                        static_cast<unsigned>(1 + run % 6), 4, 1);
+  // Phải thật sự đi qua nhánh ngủ/đánh thức, không thì test không chứng
+  // minh được gì.
+  EXPECT_GT(sleeps, 0u);
 }
 
 TEST(Pipeline, RejectsBadConfig) {
