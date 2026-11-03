@@ -171,9 +171,10 @@ static int run_pipeline(const char *path, unsigned workers, bool use_mempool,
             res.total.packets, res.elapsed_sec,
             res.elapsed_sec > 0 ? (double)res.total.packets / res.elapsed_sec / 1e6
                                 : 0.0);
+    fprintf(stderr, "  reader: %.3f s\n", res.reader_sec);
     for (i = 0; i < res.n_workers; i++)
-        fprintf(stderr, "  worker %u: %" PRIu64 " gói\n", i,
-                res.per_worker_packets[i]);
+        fprintf(stderr, "  worker %u: %" PRIu64 " gói, cpu %.3f s\n", i,
+                res.per_worker_packets[i], res.per_worker_cpu_sec[i]);
 
     session_table_destroy(ctx.dst);
     pipeline_result_free(&res);

@@ -103,9 +103,25 @@ struct worker {
     struct session_table *table;
     struct stats          stats;
     uint64_t              dropped_sessions;
+    double                cpu_sec;    /* CPU của riêng luồng này */
     const _Atomic bool   *done;
     _Atomic bool          finished;   /* worker set ngay trước khi thoát */
 };
+
+static double ts_sec(const struct timespec *t)
+{
+    return (double)t->tv_sec + (double)t->tv_nsec / 1e9;
+}
+
+/* CPU đã dùng của luồng gọi (POSIX). So với wall: worker rảnh mà CPU cao
+ * nghĩa là nó đang spin chờ chứ không làm việc. */
+static double thread_cpu_sec(void)
+{
+    struct timespec t;
+
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t);
+    return ts_sec(&t);
+}
 
 /* Chọn reader (b): reader chỉ đọc nhanh TEID, worker parse đầy đủ, để phần
  * parse chạy song song. Cùng offset với parser (14 + IHL*4 + 8 + 4) và
@@ -169,6 +185,7 @@ static void *worker_main(void *arg)
         }
         sched_yield();
     }
+    w->cpu_sec = thread_cpu_sec();
     atomic_store_explicit(&w->finished, true, memory_order_release);
     return NULL;
 }
@@ -238,7 +255,7 @@ int pipeline_run(const struct pipeline_config *cfg, struct pipeline_result *res)
     struct mempool *pool = NULL;
     struct pcap_reader *reader = NULL;
     struct pcap_packet pkt;
-    struct timespec t0, t1;
+    struct timespec t0, tr, t1;
     _Atomic bool done;
     unsigned n, i, started = 0;
     enum pcap_status st;
@@ -318,6 +335,7 @@ int pipeline_run(const struct pipeline_config *cfg, struct pipeline_result *res)
     res->read_status = st;
 
 stop:
+    clock_gettime(CLOCK_MONOTONIC, &tr);
     atomic_store_explicit(&done, true, memory_order_release);
     /* Không join ngay: worker có thể đang chờ free_ring còn chỗ, mà chỉ
      * reader rút free_ring -> reader chờ join, worker chờ reader = deadlock.
@@ -347,12 +365,13 @@ stop:
         {
             stats_merge(&res->total, &ws[i].stats);
             res->dropped_sessions += ws[i].dropped_sessions;
+            res->per_worker_cpu_sec[i] = ws[i].cpu_sec;
             res->tables[i] = ws[i].table;   /* chuyển quyền sở hữu sang res */
             ws[i].table = NULL;
         }
         res->n_workers = n;
-        res->elapsed_sec = (double)(t1.tv_sec - t0.tv_sec) +
-                           (double)(t1.tv_nsec - t0.tv_nsec) / 1e9;
+        res->elapsed_sec = ts_sec(&t1) - ts_sec(&t0);
+        res->reader_sec = ts_sec(&tr) - ts_sec(&t0);
     }
 
 cleanup:

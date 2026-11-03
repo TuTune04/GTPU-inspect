@@ -40,7 +40,9 @@ struct pipeline_result {
     uint64_t               per_worker_packets[PIPELINE_MAX_WORKERS];
     uint64_t               dropped_sessions;  /* stats_record trả -1 */
     enum pcap_status       read_status;       /* PCAP_EOF nếu đọc hết file */
-    double                 elapsed_sec;
+    double                 elapsed_sec;       /* tạo worker -> join xong */
+    double                 reader_sec;        /* riêng vòng đọc của reader */
+    double                 per_worker_cpu_sec[PIPELINE_MAX_WORKERS];
 };
 
 /* 0 nếu thành công (kể cả khi file hỏng giữa chừng: xem read_status, stats
